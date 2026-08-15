@@ -193,6 +193,38 @@ class TestCreateCdpSession:
         assert "localhost:9222" in logged_args
 
 
+class TestCdpOverrideCleanup:
+    def test_cleanup_does_not_close_user_supplied_cdp_endpoint(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        task_id = "external-cdp-task"
+        monkeypatch.setattr(
+            browser_tool,
+            "_active_sessions",
+            {
+                task_id: {
+                    "session_name": "cdp_external_test",
+                    "bb_session_id": None,
+                    "cdp_url": WS_URL,
+                    "features": {"cdp_override": True},
+                }
+            },
+        )
+        monkeypatch.setattr(browser_tool, "_session_last_activity", {task_id: 1.0})
+        monkeypatch.setattr(browser_tool, "_recording_sessions", set())
+        monkeypatch.setattr(browser_tool, "_stop_cdp_supervisor", lambda _task_id: None)
+        monkeypatch.setattr(browser_tool, "_maybe_stop_recording", lambda _task_id: None)
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+        close_command = Mock()
+        monkeypatch.setattr(browser_tool, "_run_browser_command", close_command)
+
+        browser_tool._cleanup_single_browser_session(task_id)
+
+        close_command.assert_not_called()
+        assert task_id not in browser_tool._active_sessions
+        assert task_id not in browser_tool._session_last_activity
+
+
 class TestCDPSupervisorTimeoutRedaction:
     """CDPSupervisor.start() TimeoutError must not expose raw CDP credentials.
 

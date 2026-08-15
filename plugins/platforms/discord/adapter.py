@@ -1402,6 +1402,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 if adapter_self._missed_message_backfill_enabled():
                     adapter_self._ensure_missed_message_backfill_task()
+                # Local fork patch (2026-08-15): file-driven presence + pinned
+                # status card (generic mechanism; a producer writes the files).
+                adapter_self._ensure_presence_card_task()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -2568,6 +2571,111 @@ class DiscordAdapter(BasePlatformAdapter):
                 runner._startup_restore_tasks = tasks
             tasks.append(task)
         return task
+
+    # ── Local fork patch (2026-08-15): file-driven presence + pinned status card
+    # Generic mechanism: config names two files a PRODUCER maintains (here, the
+    # trading system's snapshot jobs). presence_file JSON: {"status": "online|
+    # idle|dnd", "text": "..."}; status_card_file: plain text/markdown rendered
+    # into ONE continuously-edited pinned message. Everything fail-soft — a bad
+    # file or missing channel degrades to a debug log, never touches the bot.
+
+    def _presence_card_config(self) -> tuple[str, str, str]:
+        try:
+            from gateway.run import _load_gateway_runtime_config, cfg_get
+
+            cfg = _load_gateway_runtime_config()
+            return (
+                str(cfg_get(cfg, "discord", "presence_file", default="") or ""),
+                str(cfg_get(cfg, "discord", "status_card_file", default="") or ""),
+                str(cfg_get(cfg, "discord", "status_card_channel", default="") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            return "", "", ""
+
+    def _ensure_presence_card_task(self) -> None:
+        presence_file, card_file, card_channel = self._presence_card_config()
+        if not presence_file and not (card_file and card_channel):
+            return  # feature off — no config, no task
+        task = getattr(self, "_presence_card_task", None)
+        if task is not None and not task.done():
+            return
+        self._presence_card_task = asyncio.create_task(self._run_presence_card_loop())
+
+    async def _run_presence_card_loop(self) -> None:
+        import json as _json
+        from pathlib import Path as _Path
+
+        last_presence: str | None = None
+        last_card: str | None = None
+        card_message_id: int | None = None
+        while True:
+            try:
+                presence_file, card_file, card_channel = self._presence_card_config()
+
+                if presence_file:
+                    try:
+                        raw = _Path(presence_file).read_text(encoding="utf-8")
+                    except OSError:
+                        raw = ""
+                    if raw and raw != last_presence:
+                        try:
+                            data = _json.loads(raw)
+                            status = getattr(
+                                discord.Status,
+                                str(data.get("status", "online")).lower(),
+                                discord.Status.online,
+                            )
+                            text = str(data.get("text", ""))[:128]
+                            if text and self._client:
+                                await self._client.change_presence(
+                                    status=status,
+                                    activity=discord.CustomActivity(name=text),
+                                )
+                                last_presence = raw
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("presence update skipped: %s", exc)
+
+                if card_file and card_channel and self._client:
+                    try:
+                        card = _Path(card_file).read_text(encoding="utf-8").strip()
+                    except OSError:
+                        card = ""
+                    if card and card != last_card:
+                        try:
+                            channel = self._client.get_channel(int(card_channel))
+                            if channel is None:
+                                channel = await self._client.fetch_channel(int(card_channel))
+                            body = card[:3900]
+                            message = None
+                            if card_message_id is not None:
+                                try:
+                                    message = await channel.fetch_message(card_message_id)
+                                except Exception:  # noqa: BLE001 — deleted/unknown → recreate
+                                    message = None
+                            if message is None:
+                                for pinned in await channel.pins():
+                                    if (
+                                        self._client.user
+                                        and pinned.author.id == self._client.user.id
+                                    ):
+                                        message = pinned
+                                        break
+                            if message is None:
+                                message = await channel.send(content=body)
+                                try:
+                                    await message.pin()
+                                except Exception as exc:  # noqa: BLE001 — needs Manage Messages
+                                    logger.debug("status card pin failed: %s", exc)
+                                self._nonconversational_messages.mark_many([str(message.id)])
+                            else:
+                                await message.edit(content=body)
+                            card_message_id = message.id
+                            last_card = card
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("status card update skipped: %s", exc)
+            except Exception as exc:  # noqa: BLE001 — the loop itself never dies
+                logger.debug("presence/card loop tick failed: %s", exc)
+            await asyncio.sleep(60)
 
     async def _run_missed_message_backfill(self) -> None:
         """Find and enqueue recent Discord messages missed while the bot was down.

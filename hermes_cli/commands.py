@@ -394,6 +394,18 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("topup", "Show your Nous balance and manage billing on the portal", "Info"),
     CommandDef("insights", "Show usage insights and analytics", "Info",
                args_hint="[days]", desktop="advanced"),
+    # Local fork patch (2026-08-15): deterministic trading-status verbs — shells to
+    # the trading repo's own CLI (path derived from mcp_servers.trading config), no
+    # model in the loop, read-only allowlist enforced in the gateway handler.
+    # `alerts` is deliberately EXCLUDED: `htrade alerts test` sends a real page.
+    CommandDef("trading", "Trading system status (deterministic, read-only, no model)",
+               "Info", gateway_only=True,
+               args_hint="[status|pnl|learner|balances|doctor|lanes|hypotheses]",
+               subcommands=("status", "pnl", "learner", "balances", "doctor",
+                            "lanes", "hypotheses"),
+               # 0.20 busy semantics: deterministic + no model turn — answer
+               # even while the agent is mid-turn (the informational class).
+               busy_policy="dispatch"),
     CommandDef("platforms", "Show gateway/messaging platform status", "Info",
                cli_only=True, aliases=("gateway",), desktop="terminal"),
     CommandDef("platform", "Pause, resume, or list a failing gateway platform", "Info",

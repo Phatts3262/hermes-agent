@@ -6464,3 +6464,71 @@ class GatewaySlashCommandsMixin:
 
         self._schedule_update_notification_watch()
         return t("gateway.update.starting")
+
+    # -- Local fork patch (2026-08-15): deterministic trading verbs -----------
+    # Read-only reporters ONLY. `alerts` is deliberately absent (it sends a
+    # real page); arming/permission verbs must remain TTY-only and this
+    # command must never become a path around the approvals deny list.
+    _TRADING_VERBS: frozenset = frozenset({
+        "status", "pnl", "learner", "balances", "doctor", "lanes", "hypotheses",
+    })
+
+    async def _handle_trading_command(self, event: MessageEvent) -> str:
+        """/trading [verb] -- read-only trading-system status, NO model in the loop.
+
+        Shells to the trading repo's own CLI. The interpreter path derives from
+        ``mcp_servers.trading.command`` in config.yaml (the same venv the MCP
+        mount uses), so nothing here hardcodes the repo location. Extra
+        arguments beyond the verb are DISCARDED -- deliberately no passthrough.
+        """
+        import asyncio
+        from pathlib import Path
+
+        from hermes_cli.config import load_config
+
+        raw = event.get_command_args().strip()
+        verb = (raw.split() or ["status"])[0].lower()
+        if verb not in self._TRADING_VERBS:
+            allowed = ", ".join(sorted(self._TRADING_VERBS))
+            return f"Unknown trading verb `{verb}`. Read-only verbs: {allowed}"
+
+        try:
+            cfg = load_config()
+            command = ((cfg.get("mcp_servers") or {}).get("trading") or {}).get(
+                "command", ""
+            )
+        except Exception:
+            command = ""
+        python_exe = Path(str(command))
+        if not command or not python_exe.is_file():
+            return (
+                "Trading CLI not configured -- `mcp_servers.trading.command` must "
+                "point at the trading venv's python."
+            )
+        repo = python_exe.parent.parent.parent  # <repo>/.venv/Scripts/python.exe
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(python_exe), "-m", "hermes.cli.main", verb,
+                cwd=str(repo),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=45)
+        except asyncio.TimeoutError:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return f"`/trading {verb}` timed out after 45s."
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, never raised
+            return f"`/trading {verb}` failed to launch: {type(exc).__name__}: {exc}"
+
+        text = (out_bytes or b"").decode("utf-8", errors="replace").strip()
+        if not text:
+            text = f"(no output; exit {proc.returncode})"
+        if len(text) > 1800:
+            text = text[:1800] + "\n... (truncated)"
+        return "```\n" + text + "\n```"

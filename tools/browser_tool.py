@@ -5871,7 +5871,16 @@ def _cleanup_single_browser_session(task_id: str) -> None:
         # An expired cloud CDP URL cannot accept an agent-browser close command.
         # Avoid feeding it back through _get_session_info(), which would try to
         # renew the session recursively while cleanup is still in progress.
-        if (session_info.get("features") or {}).get("lightpanda"):
+        # LOCAL PATCH (d5547c95d): user-supplied CDP overrides attach to an
+        # externally managed browser. Closing that agent-browser session can
+        # terminate the shared browser process itself, breaking every other
+        # task and the persistent endpoint. Stop Hermes' supervisor/daemon and
+        # forget the task below, but leave the operator-owned CDP browser
+        # running. Cloud-provider CDP sessions are not marked cdp_override and
+        # continue through the normal close path.
+        features = session_info.get("features") or {}
+        is_external_cdp = isinstance(features, dict) and bool(features.get("cdp_override"))
+        if features.get("lightpanda"):
             try:
                 from tools.browser_lightpanda import stop_lightpanda
 
@@ -5881,6 +5890,11 @@ def _cleanup_single_browser_session(task_id: str) -> None:
         elif _session_has_expired(session_info):
             logger.debug(
                 "Skipping agent-browser close for expired session %s",
+                task_id,
+            )
+        elif is_external_cdp:
+            logger.debug(
+                "Skipping agent-browser close for externally managed CDP task %s",
                 task_id,
             )
         else:

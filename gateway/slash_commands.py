@@ -6507,11 +6507,24 @@ class GatewaySlashCommandsMixin:
             )
         repo = python_exe.parent.parent.parent  # <repo>/.venv/Scripts/python.exe
 
+        # The gateway's own runtime (venv trampoline + .hermes-runtime python)
+        # exports PYTHONPATH/VIRTUAL_ENV, and PYTHONPATH OUTRANKS the child
+        # venv's site-packages — the trading CLI then imports the parent's
+        # cp-mismatched binary wheels (pydantic_core ModuleNotFoundError,
+        # witnessed live 2026-08-16). Scrub the interpreter-poisoning vars;
+        # this is the in-process form of the trading repo's own documented
+        # `env -u PYTHONPATH -u PYTHONHOME -u VIRTUAL_ENV` defense.
+        child_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "PYTHONSTARTUP")
+        }
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(python_exe), "-m", "hermes.cli.main", verb,
                 cwd=str(repo),
+                env=child_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

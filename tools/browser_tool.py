@@ -6514,3 +6514,32 @@ registry.register(
     check_fn=check_browser_requirements,
     emoji="🖥️",
 )
+
+
+def _superseded_by_browser_use() -> bool:
+    """True while Browser Use mode replaces the built-in browser tools.
+
+    Fork patch (2026-09-06): the registry reads this through each check_fn's
+    ``quiet_unavailable`` attribute and logs the designed loss at DEBUG
+    instead of eleven WARNINGs per turn (tools/registry.py::_check_fn_cached).
+    Looked up at call time so tests can patch ``_is_browser_use_cli_mode``.
+    """
+    try:
+        return bool(_is_browser_use_cli_mode())
+    except Exception:
+        return False
+
+
+for _superseded_check in (
+    check_browser_requirements,
+    check_browser_vision_requirements,
+    check_browser_navigate_requirements,
+    check_browser_snapshot_requirements,
+    check_browser_click_requirements,
+    check_browser_type_requirements,
+    check_browser_scroll_requirements,
+    check_browser_back_requirements,
+    check_browser_press_requirements,
+):
+    _superseded_check.quiet_unavailable = _superseded_by_browser_use
+del _superseded_check

@@ -146,3 +146,18 @@ registry.register(
     check_fn=_browser_dialog_check,
     emoji="💬",
 )
+
+
+def _superseded_by_browser_use() -> bool:
+    """Fork patch (2026-09-06): see tools.browser_tool._superseded_by_browser_use."""
+    try:
+        from tools.browser_tool import _superseded_by_browser_use as _probe
+    except Exception:
+        return False
+    try:
+        return bool(_probe())
+    except Exception:
+        return False
+
+
+_browser_dialog_check.quiet_unavailable = _superseded_by_browser_use

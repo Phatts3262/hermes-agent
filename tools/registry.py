@@ -407,11 +407,21 @@ def _check_fn_cached(fn: Callable) -> bool:
             return True
 
         # No recent success (or grace expired) — honor the failure. Log it so
-        # silent tool loss in quiet mode (subagents) is diagnosable.
-        logger.warning(
-            "check_fn %s %s; dependent tools will be unavailable this turn",
+        # silent tool loss in quiet mode (subagents) is diagnosable — unless
+        # the check_fn declares the loss DESIGNED right now (fork patch
+        # 2026-09-06: in Browser Use mode the 11 built-in browser tools are
+        # superseded by browser_exec and logged 11 WARNINGs per turn). A
+        # check_fn that *raised* is never designed.
+        _quiet = getattr(fn, "quiet_unavailable", None)
+        try:
+            designed = (not raised) and callable(_quiet) and bool(_quiet())
+        except Exception:
+            designed = False
+        (logger.debug if designed else logger.warning)(
+            "check_fn %s %s; dependent tools will be unavailable this turn%s",
             getattr(fn, "__qualname__", fn),
             "raised" if raised else "returned False",
+            " (superseded by design)" if designed else "",
         )
         _check_fn_cache[cache_key] = (now, False)
         return False

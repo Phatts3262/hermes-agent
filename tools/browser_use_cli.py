@@ -547,6 +547,70 @@ def _resolve_lightpanda_cdp(
     return None
 
 
+_CDP_LANE_STATE: dict = {"lane": None}
+
+
+def _cdp_fallback_url() -> str:
+    """``browser.cdp_fallback_url`` (fork-only key), or empty."""
+    try:
+        return str(_read_browser_cfg().get("cdp_fallback_url") or "").strip()
+    except Exception:
+        return ""
+
+
+def _cdp_reachable(url: str, timeout: float = 1.5) -> bool:
+    """Cheap liveness probe of a CDP discovery/ws endpoint (never raises)."""
+    try:
+        from hermes_cli.browser_connect import is_browser_debug_ready
+
+        return bool(is_browser_debug_ready(url, timeout=timeout))
+    except Exception:
+        return False
+
+
+def _select_cdp_lane(primary: str) -> tuple[str, str]:
+    """Pick the CDP endpoint browser_exec will use: ``(url, lane)``.
+
+    Fork patch (2026-09-06, D-05c). ``browser.cdp_url`` names the operator's
+    logged-in HEADED Edge (an Interactive logon task on :9222). Before anyone
+    logs on it does not exist, and a configured-but-down override pinned every
+    call to the harness's 30 s "unreachable" error. With
+    ``browser.cdp_fallback_url`` set (the session-0 headless lane on :9333):
+
+    - primary reachable            -> primary       (lane ``primary``)
+    - primary down, fallback up    -> fallback      (lane ``fallback``)
+    - both down                    -> primary       (lane ``unreachable``; the
+                                                     harness reports it as today)
+    - no fallback configured       -> primary, no probe at all (upstream shape)
+
+    Lane changes are logged once, not per call.
+    """
+    fallback = _cdp_fallback_url()
+    if not fallback:
+        return primary, "primary"
+    if _cdp_reachable(primary):
+        chosen, lane = primary, "primary"
+    elif _cdp_reachable(fallback):
+        chosen, lane = fallback, "fallback"
+    else:
+        chosen, lane = primary, "unreachable"
+    if _CDP_LANE_STATE["lane"] != lane:
+        _CDP_LANE_STATE["lane"] = lane
+        if lane == "primary":
+            logger.info("browser_exec CDP lane: primary %s", primary)
+        elif lane == "fallback":
+            logger.warning(
+                "browser_exec CDP lane: primary %s unreachable -> fallback %s "
+                "(headless, no logins)", primary, fallback,
+            )
+        else:
+            logger.warning(
+                "browser_exec CDP lane: primary %s AND fallback %s unreachable",
+                primary, fallback,
+            )
+    return chosen, lane
+
+
 def _resolve_backend_cdp(
     env: dict, task_id: Optional[str], session_name: str = ""
 ) -> Optional[str]:
@@ -583,17 +647,32 @@ def _resolve_backend_cdp(
     try:
         from tools.browser_tool import (
             _get_cdp_override,
+            _get_cdp_override_raw,
             _get_cloud_provider,
             _get_session_info,
+            _resolve_cdp_override,
         )
     except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
         logger.debug("browser_tool backend resolution unavailable: %s", e)
         return None
 
     try:
-        override = _get_cdp_override()
+        raw_override = _get_cdp_override_raw()
     except Exception:
-        override = ""
+        raw_override = ""
+    if raw_override and _cdp_fallback_url():
+        # Fork patch (D-05c): choose the lane on the RAW value with a short
+        # probe, then normalize the chosen endpoint exactly as before.
+        chosen, _lane = _select_cdp_lane(raw_override)
+        try:
+            override = _resolve_cdp_override(chosen) or chosen
+        except Exception:
+            override = chosen
+    else:
+        try:
+            override = _get_cdp_override()
+        except Exception:
+            override = ""
     if override:
         env["BU_CDP_URL" if override.startswith(("http://", "https://")) else "BU_CDP_WS"] = override
         return None

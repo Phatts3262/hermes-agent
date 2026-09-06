@@ -41,6 +41,11 @@ from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
+
+class _LoopTickWitnessUnsupported(RuntimeError):
+    """The loop-scheduling witness cannot exist on this platform (no AF_UNIX
+    asyncio). A designed absence, reported at INFO -- not a failure."""
+
 # Extra leash beyond ``agent.restart_drain_timeout`` so a slow-but-progressing
 # drain is not cut short. Matches the issue #66892 suggested hardening.
 DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S = 60.0
@@ -536,6 +541,14 @@ async def loop_heartbeat_forever(
     tick_server = None
     tick_socket_path = None
     try:
+        if os.name != "posix":
+            # Fork patch (2026-09-06; upstream gates the same way since
+            # 2026-09-03): asyncio has no AF_UNIX event-loop support on
+            # native Windows, so the witness is PERMANENTLY absent here --
+            # say so at INFO instead of raising into a WARNING with a
+            # traceback at every boot. loop_tick_socket=False keeps the
+            # probes at UNKNOWN, never WEDGED: the fail-safe described above.
+            raise _LoopTickWitnessUnsupported(os.name)
         tick_socket_path = get_loop_tick_socket_path(home)
         tick_socket_path.parent.mkdir(parents=True, exist_ok=True)
         # Re-bind over a leftover node from a dead process (os._exit(75) /
@@ -571,6 +584,14 @@ async def loop_heartbeat_forever(
                 )
         tick_server = await asyncio.start_unix_server(
             _tick_socket_handler, path=str(tick_socket_path)
+        )
+    except _LoopTickWitnessUnsupported as exc:
+        tick_server = None
+        tick_socket_path = None
+        logger.info(
+            "Loop tick socket not supported on %s (no AF_UNIX asyncio) — "
+            "liveness probes keep the heartbeat-only fail-safe (UNKNOWN, never WEDGED)",
+            exc,
         )
     except Exception:
         tick_server = None

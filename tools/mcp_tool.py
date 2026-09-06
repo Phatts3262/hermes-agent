@@ -6184,9 +6184,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                         )
                     _call_coro = server.session.call_tool(tool_name, arguments=args)
                     _watch_children = getattr(server, "_watch_stdio_children", None)
+                    # Fork patch (2026-09-06; upstream's mcp_tool_handlers
+                    # probes the same way): inspect the WATCHER, not a call
+                    # to it -- calling it created a coroutine that was
+                    # never awaited, one RuntimeWarning per stdio tool call.
                     _watch_ok = (
-                        _watch_children is not None
-                        and inspect.isawaitable(_watch_children())
+                        inspect.iscoroutinefunction(_watch_children)
                         and asyncio.iscoroutine(_call_coro)
                     )
                     if not _watch_ok:

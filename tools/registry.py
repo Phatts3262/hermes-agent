@@ -459,6 +459,27 @@ def get_cached_check_fn_result(fn: Callable) -> Optional[bool]:
         return None
 
 
+def _toolset_superseded(entries) -> bool:
+    """True when EVERY entry's check_fn declares its unavailability designed.
+
+    Fork patch (2026-09-06): the same ``quiet_unavailable`` marker that keeps
+    ``_check_fn_cached`` at DEBUG lets ``check_tool_availability`` tell doctor
+    that a toolset is intentionally replaced (Browser Use mode -> browser_exec)
+    rather than missing a system dependency. One undeclared tool makes the
+    whole toolset a real loss again.
+    """
+    if not entries:
+        return False
+    for entry in entries:
+        quiet = getattr(getattr(entry, "check_fn", None), "quiet_unavailable", None)
+        try:
+            if not (callable(quiet) and bool(quiet())):
+                return False
+        except Exception:
+            return False
+    return True
+
+
 class ToolRegistry:
     """Singleton registry that collects tool schemas + handlers from tool files."""
 
@@ -1291,6 +1312,7 @@ class ToolRegistry:
                     "name": ts,
                     "env_vars": ts_entries[0].requires_env if ts_entries else [],
                     "tools": [entry.name for entry in ts_entries],
+                    "superseded": _toolset_superseded(ts_entries),
                 })
         return available, unavailable
 

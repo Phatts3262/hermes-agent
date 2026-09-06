@@ -350,6 +350,27 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
             )
     return rows
 
+def _report_unavailable_toolset(item: dict) -> None:
+    """One doctor line per unavailable toolset.
+
+    Fork patch (2026-09-06): a toolset whose every check_fn declares its
+    unavailability designed (``superseded`` from
+    ``registry.check_tool_availability``; Browser Use mode replacing the
+    built-in browser tools with ``browser_exec``) is information, not a
+    broken "system dependency".
+    """
+    name = item.get("name")
+    if item.get("superseded"):
+        check_info(f"{name} (built-in tools superseded by Browser Use mode; browser_exec serves this)")
+        return
+    env_vars = item.get("missing_vars") or item.get("env_vars") or []
+    if env_vars:
+        vars_str = ", ".join(env_vars)
+        check_warn(name, f"(missing {vars_str})")
+    else:
+        check_warn(name, "(system dependency not met)")
+
+
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
     updated_available = list(available)
@@ -3184,12 +3205,7 @@ def run_doctor(args):
                 check_warn(label, detail)
 
         for item in unavailable:
-            env_vars = item.get("missing_vars") or item.get("env_vars") or []
-            if env_vars:
-                vars_str = ", ".join(env_vars)
-                check_warn(item["name"], f"(missing {vars_str})")
-            else:
-                check_warn(item["name"], "(system dependency not met)")
+            _report_unavailable_toolset(item)
 
         # Count missing API-key requirements only for toolsets enabled in the
         # current CLI platform. Default-off or explicitly disabled toolsets may

@@ -2601,6 +2601,27 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         self._presence_card_task = asyncio.create_task(self._run_presence_card_loop())
 
+    def _card_warn(self, what: str, exc: BaseException) -> None:
+        """Presence/status-card failures at WARNING, once per distinct error per
+        hour (they logged at DEBUG, so a broken pinned card was invisible - fork
+        patch 2026-09-26, review P-20)."""
+        import time as _time
+
+        seen = getattr(self, "_card_warn_seen", None)
+        if seen is None:
+            seen = self._card_warn_seen = {}
+        key = f"{what}:{type(exc).__name__}:{exc}"[:200]
+        now = _time.monotonic()
+        last = seen.get(key)
+        if last is not None and now - last < 3600:
+            logger.debug("%s (repeat, suppressed): %s", what, exc)
+            return
+        seen[key] = now
+        if len(seen) > 64:
+            for stale in [k for k, t in seen.items() if now - t >= 3600]:
+                seen.pop(stale, None)
+        logger.warning("%s: %s", what, exc)
+
     async def _run_presence_card_loop(self) -> None:
         import json as _json
         from pathlib import Path as _Path
@@ -2633,7 +2654,7 @@ class DiscordAdapter(BasePlatformAdapter):
                                 )
                                 last_presence = raw
                         except Exception as exc:  # noqa: BLE001
-                            logger.debug("presence update skipped: %s", exc)
+                            self._card_warn("presence update skipped", exc)
 
                 if card_file and card_channel and self._client:
                     try:
@@ -2665,16 +2686,16 @@ class DiscordAdapter(BasePlatformAdapter):
                                 try:
                                     await message.pin()
                                 except Exception as exc:  # noqa: BLE001 — needs Manage Messages
-                                    logger.debug("status card pin failed: %s", exc)
+                                    self._card_warn("status card pin failed", exc)
                                 self._nonconversational_messages.mark_many([str(message.id)])
                             else:
                                 await message.edit(content=body)
                             card_message_id = message.id
                             last_card = card
                         except Exception as exc:  # noqa: BLE001
-                            logger.debug("status card update skipped: %s", exc)
+                            self._card_warn("status card update skipped", exc)
             except Exception as exc:  # noqa: BLE001 — the loop itself never dies
-                logger.debug("presence/card loop tick failed: %s", exc)
+                self._card_warn("presence/card loop tick failed", exc)
             await asyncio.sleep(60)
 
     async def _run_missed_message_backfill(self) -> None:

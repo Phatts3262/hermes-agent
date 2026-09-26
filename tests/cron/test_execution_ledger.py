@@ -69,17 +69,22 @@ def test_terminal_execution_cannot_be_rewritten(monkeypatch, tmp_path):
     assert executions.latest_execution("immutable")["status"] == "completed"
 
 
-def test_retention_bounds_terminal_history_but_preserves_inflight(monkeypatch, tmp_path):
+def test_retention_bounds_terminal_history_per_job_and_preserves_inflight(monkeypatch, tmp_path):
+    """Fork patch 2026-09-26 (review P-12): the cap is PER JOB, so a chatty\n    every-minute job can no longer erase every other job's history."""
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 3)
     inflight = executions.create_execution("live", source="builtin")
     executions.mark_execution_running(inflight["id"])
     for index in range(8):
-        row = executions.create_execution(f"done-{index}", source="builtin")
+        row = executions.create_execution("chatty", source="builtin")
         executions.finish_execution(row["id"], success=True)
+    quiet = executions.create_execution("quiet", source="builtin")
+    executions.finish_execution(quiet["id"], success=False, error="once")
 
     records = executions.list_executions(limit=100)
-    assert len([row for row in records if row["status"] == "completed"]) == 3
+    chatty = [row for row in records if row["job_id"] == "chatty"]
+    assert len(chatty) == 3
+    assert executions.latest_execution("quiet")["status"] == "failed"
     assert executions.latest_execution("live")["status"] == "running"
 
 

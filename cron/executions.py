@@ -21,7 +21,10 @@ from hermes_time import now as _hermes_now
 # dashboard operations that temporarily enter another profile cannot leak that
 # profile's execution records into the import-time home.
 EXECUTIONS_FILE: Optional[Path] = None
-MAX_TERMINAL_EXECUTIONS = 1000
+# Terminal rows kept PER JOB (was a global cap of 1000, which the every-minute
+# drain job filled in about 30 hours, erasing every other job's history -
+# fork patch 2026-09-26, review P-12).
+MAX_TERMINAL_EXECUTIONS = 200
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
@@ -127,12 +130,18 @@ def _owner_is_live(pid: int, started_at: Optional[int]) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
+    """Keep the newest ``MAX_TERMINAL_EXECUTIONS`` terminal rows of EACH job.
+    In-flight rows are never pruned."""
     limit = max(0, int(MAX_TERMINAL_EXECUTIONS))
     conn.execute(
         """DELETE FROM executions WHERE id IN (
-             SELECT id FROM executions
-             WHERE status IN ('completed','failed','unknown')
-             ORDER BY claimed_at DESC, id DESC LIMIT -1 OFFSET ?
+             SELECT id FROM (
+               SELECT id, ROW_NUMBER() OVER (
+                 PARTITION BY job_id ORDER BY claimed_at DESC, id DESC
+               ) AS rn
+               FROM executions
+               WHERE status IN ('completed','failed','unknown')
+             ) WHERE rn > ?
            )""",
         (limit,),
     )

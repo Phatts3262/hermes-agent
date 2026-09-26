@@ -4534,6 +4534,28 @@ def _run_job_script_with_claim_heartbeat(
         heartbeat_thread.join(timeout=1.0)
 
 
+_MAX_CONTEXT_CHARS = 8000
+_RESPONSE_MARKER = "\n## Response\n"
+
+
+def _context_from_output(text: str) -> str:
+    """The part of a saved job output worth injecting as context: the text after the
+    LAST ``## Response`` heading (the agent's answer), else the tail of the file.
+    Capped at ``_MAX_CONTEXT_CHARS``; a response keeps its head (the summary comes
+    first), a marker-less file keeps its tail (the answer comes last)."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if _RESPONSE_MARKER in text:
+        body = text.rsplit(_RESPONSE_MARKER, 1)[1].strip()
+        if len(body) > _MAX_CONTEXT_CHARS:
+            body = body[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
+        return body
+    if len(text) > _MAX_CONTEXT_CHARS:
+        return "[... output truncated ...]\n\n" + text[-_MAX_CONTEXT_CHARS:]
+    return text
+
+
 def _parse_wake_gate(script_output: str) -> bool:
     """Parse the last non-empty stdout line of a cron job's pre-check script
     as a wake gate.
@@ -4660,10 +4682,12 @@ def _build_job_prompt(
                 if not output_files:
                     continue  # silent skip — no output yet
                 latest_output = output_files[0].read_text(encoding="utf-8").strip()
-                # Truncate to 8K characters to avoid prompt bloat
-                _MAX_CONTEXT_CHARS = 8000
-                if len(latest_output) > _MAX_CONTEXT_CHARS:
-                    latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
+                # The saved output file is the prompt, the injected context and the
+                # skill text FIRST and the agent's answer LAST, so inject the answer
+                # (after the final "## Response" heading), never the head of the file;
+                # a file without the heading contributes its tail (fork patch
+                # 2026-09-26, review P-06).
+                latest_output = _context_from_output(latest_output)
                 if latest_output:
                     if is_self:
                         prompt = (

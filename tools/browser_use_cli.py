@@ -910,6 +910,11 @@ def browser_exec(
             input=code,
             capture_output=True,
             text=True,
+            # Explicit utf-8: with the locale default (cp1252 on Windows) a single
+            # non-cp1252 byte killed the stdout reader thread and the call came back
+            # success=True with output=None (fork patch 2026-09-26, review P-08).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=env,
             **popen_extra,
@@ -926,10 +931,13 @@ def browser_exec(
         return tool_error(f"Failed to launch browser-use CLI: {e}")
 
     result = {
-        "success": proc.returncode == 0,
+        # A lost stdout is a failed call, whatever the exit code says.
+        "success": proc.returncode == 0 and proc.stdout is not None,
         "exit_code": proc.returncode,
         "output": proc.stdout,
     }
+    if proc.stdout is None:
+        result["error"] = "browser-use exec produced no readable stdout (output lost)"
     if workspace:
         result["workspace"] = workspace
     if session:

@@ -4556,6 +4556,67 @@ def _context_from_output(text: str) -> str:
     return text
 
 
+# How many saved outputs ``context_from`` walks back through (newest first) to
+# find the last run that actually answered.  Bounded so a job that has been
+# gated or failing for weeks costs at most this many small reads per fire.
+_CONTEXT_FROM_MAX_WALK = 10
+
+# Header strings the scheduler itself writes into a saved output when the run
+# produced no answer worth carrying forward: a wake-gate skip, a failed run, a
+# scanner/config block, or a silent no_agent / monitor tick.
+_UNUSABLE_OUTPUT_HEADER_MARKERS = (
+    "Script gate returned",
+    "(FAILED)",
+    "BLOCKED",
+    "**Status:** silent",
+    "**Status:** no_change",
+)
+
+
+def _output_doc_header(text: str) -> str:
+    """The scheduler-written header of a saved output: everything before the first
+    ``## `` section heading or ``---`` rule (both open the body: the prompt, the
+    error, or a no_agent script's stdout).  Body text is never inspected, so a
+    prompt or answer that merely mentions "BLOCKED" does not disqualify a run."""
+    cut = len(text)
+    for sep in ("\n## ", "\n---\n"):
+        idx = text.find(sep)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut]
+
+
+def _usable_context_from_output(text: str) -> str:
+    """The injectable context of one saved output, or "" when that run left
+    nothing to carry forward: a gate skip, a failure, a block, a silent tick,
+    an empty/"(No response generated)" answer, or a ``[SILENT]`` answer
+    (fork patch 2026-10-17, e2e review B#1)."""
+    header = _output_doc_header((text or "").strip())
+    if any(marker in header for marker in _UNUSABLE_OUTPUT_HEADER_MARKERS):
+        return ""
+    body = _context_from_output(text)
+    if not body or body == "(No response generated)":
+        return ""
+    if _is_cron_silence_response(body):
+        return ""
+    return body
+
+
+def _latest_usable_context(job_output_dir: Path) -> str:
+    """Newest saved output of a job whose run actually answered, walking back
+    at most ``_CONTEXT_FROM_MAX_WALK`` files (newest first by mtime)."""
+    output_files = sorted(
+        job_output_dir.glob("*.md"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for output_file in output_files[:_CONTEXT_FROM_MAX_WALK]:
+        usable = _usable_context_from_output(output_file.read_text(encoding="utf-8"))
+        if usable:
+            return usable
+    return ""
+
+
 def _parse_wake_gate(script_output: str) -> bool:
     """Parse the last non-empty stdout line of a cron job's pre-check script
     as a wake gate.
@@ -4674,20 +4735,14 @@ def _build_job_prompt(
                 job_output_dir = output_dir / source_job_id
                 if not job_output_dir.exists():
                     continue  # silent skip — no output yet
-                output_files = sorted(
-                    job_output_dir.glob("*.md"),
-                    key=lambda f: f.stat().st_mtime,
-                    reverse=True,
-                )
-                if not output_files:
-                    continue  # silent skip — no output yet
-                latest_output = output_files[0].read_text(encoding="utf-8").strip()
                 # The saved output file is the prompt, the injected context and the
                 # skill text FIRST and the agent's answer LAST, so inject the answer
                 # (after the final "## Response" heading), never the head of the file;
                 # a file without the heading contributes its tail (fork patch
-                # 2026-09-26, review P-06).
-                latest_output = _context_from_output(latest_output)
+                # 2026-09-26, review P-06).  Walk back past gate skips, failures,
+                # blocks and [SILENT] answers to the newest run that actually
+                # answered (fork patch 2026-10-17, e2e review B#1).
+                latest_output = _latest_usable_context(job_output_dir)
                 if latest_output:
                     if is_self:
                         prompt = (

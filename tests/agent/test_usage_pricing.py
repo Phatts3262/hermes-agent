@@ -867,3 +867,138 @@ def test_flat_entries_unaffected_by_tier_machinery():
     )
     # 250k * $0.25/M + 10k * $1.50/M
     assert result.amount_usd == Decimal("0.0775")
+
+
+# ── Direct OpenAI API through a custom provider (custom:openai) ───────────
+
+_OPENAI_BASE = "https://api.openai.com/v1"
+_FAKE_MODELS_DEV = {
+    "openai": {
+        "models": {
+            "gpt-6.1-sol": {
+                "cost": {
+                    "input": 2,
+                    "output": 10,
+                    "cache_read": 0.1,
+                    "cache_write": 2.5,
+                    "tiers": [
+                        {
+                            "input": 4,
+                            "output": 15,
+                            "cache_read": 0.2,
+                            "cache_write": 5,
+                            "tier": {"type": "context", "size": 272000},
+                        }
+                    ],
+                },
+            },
+            # Deliberately disagrees with the snapshot row: the table must win.
+            "gpt-5.6-luna": {"cost": {"input": 0.2, "output": 1.2}},
+        }
+    }
+}
+
+
+def _offline_openai_pricing(monkeypatch, registry=_FAKE_MODELS_DEV):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "agent.models_dev.fetch_models_dev", lambda *_args, **_kwargs: registry
+    )
+
+
+def test_custom_provider_on_api_openai_com_prices_from_models_dev(monkeypatch):
+    """A custom:openai provider (runtime provider "custom", base URL
+    api.openai.com) is the direct OpenAI API. It used to price as unknown/$0;
+    it must now bill on the OpenAI route, falling back to models.dev rates
+    for models the snapshot table lacks."""
+    _offline_openai_pricing(monkeypatch)
+    route = resolve_billing_route("gpt-6.1-sol", provider="custom", base_url=_OPENAI_BASE)
+    assert (route.provider, route.billing_mode) == ("openai", "official_docs_snapshot")
+
+    result = estimate_usage_cost(
+        "gpt-6.1-sol",
+        CanonicalUsage(
+            input_tokens=100_000,
+            output_tokens=10_000,
+            cache_read_tokens=50_000,
+            cache_write_tokens=20_000,
+        ),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    # prompt 170k <= 272k: 100k*$2 + 10k*$10 + 50k*$0.10 + 20k*$2.50 per 1M
+    assert result.amount_usd == Decimal("0.355")
+    assert result.status == "estimated"
+    assert result.source == "models_dev_snapshot"
+    assert any("models.dev" in note for note in result.notes)
+
+
+def test_api_openai_com_long_context_tier_applies_to_whole_request(monkeypatch):
+    """Above the models.dev context tier size every bucket, cache writes
+    included, bills at the tier rates; exactly at the size is still base."""
+    _offline_openai_pricing(monkeypatch)
+    above = estimate_usage_cost(
+        "gpt-6.1-sol",
+        CanonicalUsage(
+            input_tokens=200_000,
+            output_tokens=10_000,
+            cache_read_tokens=60_000,
+            cache_write_tokens=20_000,
+        ),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    # prompt 280k > 272k: 200k*$4 + 10k*$15 + 60k*$0.20 + 20k*$5 per 1M
+    assert above.amount_usd == Decimal("1.062")
+
+    at_threshold = estimate_usage_cost(
+        "gpt-6.1-sol",
+        CanonicalUsage(input_tokens=272_000, output_tokens=10_000),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    # 272k*$2 + 10k*$10 per 1M
+    assert at_threshold.amount_usd == Decimal("0.644")
+
+
+def test_api_openai_com_snapshot_table_wins_over_models_dev(monkeypatch):
+    _offline_openai_pricing(monkeypatch)
+    entry = get_pricing_entry("gpt-5.6-luna", provider="custom", base_url=_OPENAI_BASE)
+    assert entry is not None
+    assert entry.source == "official_docs_snapshot"
+
+
+def test_other_custom_endpoints_stay_unknown(monkeypatch):
+    """Only the exact api.openai.com host moves to the OpenAI route; other
+    custom endpoints and look-alike hosts keep pricing as unknown even when
+    models.dev knows the model id."""
+    _offline_openai_pricing(monkeypatch)
+    for base_url in (
+        "https://llm.example.com/v1",
+        "https://api.openai.com.example/v1",
+        "https://proxy.example/api.openai.com/v1",
+    ):
+        route = resolve_billing_route("gpt-6.1-sol", provider="custom", base_url=base_url)
+        assert route.billing_mode == "unknown", base_url
+        result = estimate_usage_cost(
+            "gpt-6.1-sol",
+            CanonicalUsage(input_tokens=1_000, output_tokens=1_000),
+            provider="custom",
+            base_url=base_url,
+        )
+        assert (result.status, result.amount_usd) == ("unknown", None), base_url
+
+
+def test_unknown_model_on_api_openai_com_stays_unknown(monkeypatch):
+    """No snapshot row and no models.dev entry must not invent a price."""
+    _offline_openai_pricing(monkeypatch)
+    result = estimate_usage_cost(
+        "gpt-not-a-real-model",
+        CanonicalUsage(input_tokens=1_000, output_tokens=1_000),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    assert (result.status, result.amount_usd) == ("unknown", None)

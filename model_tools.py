@@ -750,6 +750,29 @@ def _resolve_active_context_length() -> int:
                     "context gate (provider=%s): %s — using config values only",
                     provider, rt_exc,
                 )
+        # Per-model `providers.<name>.models.<id>.context_length` (and legacy
+        # `custom_providers`) is an explicit config override exactly like
+        # `model.context_length`: agent_init honours it, so this gate must too,
+        # or it sizes on the 256K default and logs a misleading "set
+        # model.context_length" warning at every start (fork patch 2026-10-17,
+        # e2e review B#13).
+        custom_providers = None
+        try:
+            from hermes_cli.config import (
+                get_compatible_custom_providers,
+                get_custom_provider_context_length,
+            )
+            custom_providers = get_compatible_custom_providers(cfg)
+            if config_ctx is None and base_url:
+                cp_ctx = get_custom_provider_context_length(
+                    model=model_id,
+                    base_url=base_url,
+                    custom_providers=custom_providers,
+                )
+                if isinstance(cp_ctx, int) and cp_ctx > 0:
+                    config_ctx = cp_ctx
+        except Exception as cp_exc:
+            logger.debug("custom_providers context lookup skipped: %s", cp_exc)
         # Fast path: a previously discovered on-disk cache entry is plenty
         # for SIZING the tool-search gate — unlike compression budgeting, a
         # slightly stale window can't corrupt anything (should_activate only
@@ -774,6 +797,7 @@ def _resolve_active_context_length() -> int:
             api_key=api_key,
             config_context_length=config_ctx,
             provider=provider,
+            custom_providers=custom_providers,
         ) or 0)
     except Exception as e:
         logger.debug("Could not resolve active context length: %s", e)

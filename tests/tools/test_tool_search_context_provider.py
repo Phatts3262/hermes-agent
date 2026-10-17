@@ -30,7 +30,7 @@ class TestResolveActiveContextLengthProviderAware:
 
         captured = {}
 
-        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider=""):
+        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider="", custom_providers=None):
             captured.update(
                 model=model_id, base_url=base_url, api_key=api_key,
                 config_ctx=config_context_length, provider=provider,
@@ -60,7 +60,7 @@ class TestResolveActiveContextLengthProviderAware:
 
         captured = {}
 
-        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider=""):
+        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider="", custom_providers=None):
             captured.update(base_url=base_url, api_key=api_key, provider=provider)
             return 272_000
 
@@ -83,7 +83,7 @@ class TestResolveActiveContextLengthProviderAware:
 
         captured = {}
 
-        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider=""):
+        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider="", custom_providers=None):
             captured.update(base_url=base_url, provider=provider)
             return 200_000
 
@@ -103,7 +103,7 @@ class TestResolveActiveContextLengthProviderAware:
 
         captured = {}
 
-        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider=""):
+        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None, provider="", custom_providers=None):
             captured["config_ctx"] = config_context_length
             return config_context_length or 0
 
@@ -117,3 +117,59 @@ class TestResolveActiveContextLengthProviderAware:
 
         assert ctx == 150_000
         assert captured["config_ctx"] == 150_000
+
+
+class TestResolveActiveContextLengthCustomProviders:
+    """e2e review 2026-10-17 B#13: `providers.<name>.models.<id>.context_length`
+    is an explicit override, exactly as agent_init treats it."""
+
+    def _cfg(self):
+        return {
+            "model": {
+                "default": "gpt-6.1-sol",
+                "provider": "custom:openai",
+                "base_url": "https://api.openai.com/v1",
+            },
+            "providers": {
+                "openai": {
+                    "name": "OpenAI API",
+                    "api": "https://api.openai.com/v1",
+                    "transport": "codex_responses",
+                    "models": {"gpt-6.1-sol": {"context_length": 272_000}},
+                }
+            },
+        }
+
+    def test_per_model_provider_context_length_wins_over_the_default(self):
+        import model_tools
+
+        with patch("hermes_cli.config.load_config", return_value=self._cfg()), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value={"base_url": "https://api.openai.com/v1", "api_key": "sk-test"}), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=256_000):
+            ctx = model_tools._resolve_active_context_length()
+
+        assert ctx == 272_000
+
+    def test_model_without_a_per_model_entry_is_not_pinned(self):
+        import model_tools
+
+        cfg = self._cfg()
+        cfg["model"]["default"] = "gpt-unlisted"
+        captured = {}
+
+        def fake_get_ctx(model_id, base_url="", api_key="", config_context_length=None,
+                         provider="", custom_providers=None):
+            captured.update(config_ctx=config_context_length, cps=custom_providers)
+            return 123_000
+
+        with patch("hermes_cli.config.load_config", return_value=cfg), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value={"base_url": "https://api.openai.com/v1", "api_key": "sk-test"}), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata.get_model_context_length", side_effect=fake_get_ctx):
+            ctx = model_tools._resolve_active_context_length()
+
+        assert ctx == 123_000
+        assert captured["config_ctx"] is None
+        assert captured["cps"], "custom_providers must reach the resolver"

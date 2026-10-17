@@ -162,52 +162,67 @@ _UTC_NOW = lambda: datetime.now(timezone.utc)
 # semantics are stable enough to encode exactly.
 _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # ── OpenAI GPT-5.6 series (Sol/Terra/Luna) ───────────────────────────
-    # Announced in limited preview 2026-06-26; GA 2026-07-09 at the same
-    # rates (Sol $5/$30, Terra $2.50/$15, Luna $1/$6 per 1M in/out). Cache
-    # writes are billed at 1.25x the uncached input rate; cache reads get the
-    # standard 90% discount (0.10x input, confirmed: Sol $0.50/M cached).
-    # Note: "Sol Fast mode" ($12.5/$75, up to 750 tok/s via Cerebras) is a
-    # separate serving tier, not covered by these entries. The "-pro"
-    # variants (high-effort modes, GA alongside base tiers) bill at the
-    # SAME per-token rates and are aliased onto these entries below the
-    # dict (they cost more per task by consuming more tokens, not by a
-    # higher rate — verified against OpenRouter's live pricing 2026-07-09).
-    # Source: https://openai.com/index/previewing-gpt-5-6-sol/
+    # Rates from OpenAI's API pricing page, read 2026-10-17 (standard tier,
+    # per 1M tokens: input / cached input / cache writes / output). Short
+    # context is <=272K input tokens; above that the long-context rates apply
+    # to the whole request. The July preview post's rates (Sol $5/$30, Terra
+    # $2.50/$15, Luna $1/$6) are superseded — Luna was over-stated 5x (fork
+    # patch 2026-10-17, e2e review B#14). The page marks Sol's rate as
+    # promotional "at least through November 21, 2026"; re-check after that.
+    # "Sol Fast mode" is a separate serving tier, not covered here. The page
+    # lists no GPT-5.6 "-pro" rows; the "-pro" / "-900k" aliases below the
+    # dict keep billing at these base rates.
+    # Source: https://developers.openai.com/api/docs/pricing
     (
         "openai",
         "gpt-5.6-sol",
     ): PricingEntry(
-        input_cost_per_million=Decimal("5.00"),
-        output_cost_per_million=Decimal("30.00"),
-        cache_read_cost_per_million=Decimal("0.50"),
-        cache_write_cost_per_million=Decimal("6.25"),
+        input_cost_per_million=Decimal("4.00"),
+        output_cost_per_million=Decimal("20.00"),
+        cache_read_cost_per_million=Decimal("0.40"),
+        cache_write_cost_per_million=Decimal("5.00"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("8.00"),
+        output_cost_per_million_above=Decimal("30.00"),
+        cache_read_cost_per_million_above=Decimal("0.80"),
+        cache_write_cost_per_million_above=Decimal("10.00"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
     ),
     (
         "openai",
         "gpt-5.6-terra",
     ): PricingEntry(
-        input_cost_per_million=Decimal("2.50"),
-        output_cost_per_million=Decimal("15.00"),
-        cache_read_cost_per_million=Decimal("0.25"),
-        cache_write_cost_per_million=Decimal("3.125"),
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("12.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("18.00"),
+        cache_read_cost_per_million_above=Decimal("0.40"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
     ),
     (
         "openai",
         "gpt-5.6-luna",
     ): PricingEntry(
-        input_cost_per_million=Decimal("1.00"),
-        output_cost_per_million=Decimal("6.00"),
-        cache_read_cost_per_million=Decimal("0.10"),
-        cache_write_cost_per_million=Decimal("1.25"),
+        input_cost_per_million=Decimal("0.20"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.02"),
+        cache_write_cost_per_million=Decimal("0.25"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("0.40"),
+        output_cost_per_million_above=Decimal("1.80"),
+        cache_read_cost_per_million_above=Decimal("0.04"),
+        cache_write_cost_per_million_above=Decimal("0.50"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
     ),
     # ── Anthropic Claude 4.8 ─────────────────────────────────────────────
     # Same $5/$25 base pricing as 4.6/4.7.  Fast-mode variant is a separate

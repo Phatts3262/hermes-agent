@@ -893,7 +893,7 @@ _FAKE_MODELS_DEV = {
                 },
             },
             # Deliberately disagrees with the snapshot row: the table must win.
-            "gpt-5.6-luna": {"cost": {"input": 0.2, "output": 1.2}},
+            "gpt-5.6-luna": {"cost": {"input": 9, "output": 9}},
         }
     }
 }
@@ -969,6 +969,41 @@ def test_api_openai_com_snapshot_table_wins_over_models_dev(monkeypatch):
     entry = get_pricing_entry("gpt-5.6-luna", provider="custom", base_url=_OPENAI_BASE)
     assert entry is not None
     assert entry.source == "official_docs_snapshot"
+
+
+def test_gpt_56_luna_golden_cost_at_official_rates(monkeypatch):
+    """e2e review 2026-10-17 B#14: Luna bills at OpenAI's published rates
+    ($0.20 in / $0.02 cached / $0.25 cache write / $1.20 out per 1M; long
+    context >272K: $0.40 / $0.04 / $0.50 / $1.80), not the July preview's 5x."""
+    _offline_openai_pricing(monkeypatch)
+    short = estimate_usage_cost(
+        "gpt-5.6-luna",
+        CanonicalUsage(
+            input_tokens=100_000,
+            output_tokens=10_000,
+            cache_read_tokens=50_000,
+            cache_write_tokens=20_000,
+        ),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    # 100k*$0.20 + 10k*$1.20 + 50k*$0.02 + 20k*$0.25 per 1M
+    assert short.amount_usd == Decimal("0.038")
+    assert (short.status, short.source) == ("estimated", "official_docs_snapshot")
+
+    long = estimate_usage_cost(
+        "gpt-5.6-luna",
+        CanonicalUsage(
+            input_tokens=200_000,
+            output_tokens=10_000,
+            cache_read_tokens=60_000,
+            cache_write_tokens=20_000,
+        ),
+        provider="custom",
+        base_url=_OPENAI_BASE,
+    )
+    # prompt 280k > 272k: 200k*$0.40 + 10k*$1.80 + 60k*$0.04 + 20k*$0.50 per 1M
+    assert long.amount_usd == Decimal("0.1104")
 
 
 def test_other_custom_endpoints_stay_unknown(monkeypatch):

@@ -82,6 +82,39 @@ def test_body_words_never_disqualify_a_real_answer():
     )
 
 
+def _status_doc(status: str, name: str = "Job") -> str:
+    return f"# Cron Job: {name}\n\n**Job ID:** abc\n**Run Time:** t\n**Status:** {status}\n\nbody\n"
+
+
+def test_every_scheduler_status_that_never_answered_is_unusable():
+    """The **Status:** values cron/scheduler.py writes for runs with no answer."""
+    for status in (
+        "BLOCKED",
+        "BLOCKED (configuration)",
+        "blocked (unrunnable job) — auto-paused",
+        "script failed",
+        "monitor source failed",
+        "silent (wakeAgent=false)",
+        "silent (empty output)",
+        "no_change (agent run suppressed)",
+    ):
+        assert _usable_context_from_output(_status_doc(status)) == "", status
+
+
+def test_a_job_name_with_blocked_or_failed_never_disqualifies_its_answers():
+    for name in ("BLOCKED-orders digest", "Retry (FAILED) runs", "unblocked queue"):
+        doc = (
+            f"# Cron Job: {name}\n\n**Job ID:** abc\n**Run Time:** t\n**Schedule:** x\n\n"
+            "## Prompt\n\np\n\n## Response\n\nREAL ANSWER\n"
+        )
+        assert _usable_context_from_output(doc) == "REAL ANSWER", name
+    failed_run = (
+        "# Cron Job: BLOCKED-orders digest (FAILED)\n\n**Job ID:** abc\n\n## Prompt\n\np\n\n"
+        "## Error\n\n```\nboom\n```\n"
+    )
+    assert _usable_context_from_output(failed_run) == ""
+
+
 def test_walks_back_to_the_newest_run_that_answered(tmp_path):
     _write(tmp_path, "a.md", _answered("REAL EOD REVIEW"), 1000)
     _write(tmp_path, "b.md", _answered("[SILENT]"), 2000)

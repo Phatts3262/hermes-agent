@@ -4561,15 +4561,23 @@ def _context_from_output(text: str) -> str:
 # gated or failing for weeks costs at most this many small reads per fire.
 _CONTEXT_FROM_MAX_WALK = 10
 
-# Header strings the scheduler itself writes into a saved output when the run
-# produced no answer worth carrying forward: a wake-gate skip, a failed run, a
-# scanner/config block, or a silent no_agent / monitor tick.
-_UNUSABLE_OUTPUT_HEADER_MARKERS = (
-    "Script gate returned",
-    "(FAILED)",
-    "BLOCKED",
-    "**Status:** silent",
-    "**Status:** no_change",
+# Tokens the scheduler itself writes into a saved output's header when the run
+# produced no answer worth carrying forward.  Matched only where the scheduler
+# puts them (never against the job NAME in the ``# Cron Job:`` title):
+#   - the title line ends with `` (FAILED)`` (a failed agent run);
+#   - a header line starts with ``Script gate returned`` (a wake-gate skip);
+#   - the ``**Status:**`` value starts, case-insensitively, with one of
+#     ``_UNUSABLE_STATUS_PREFIXES`` (scanner/config/unrunnable blocks, silent
+#     and no_change ticks, failed no_agent scripts and monitor sources).
+_FAILED_TITLE_SUFFIX = " (FAILED)"
+_GATE_SKIP_PREFIX = "Script gate returned"
+_STATUS_PREFIX = "**Status:**"
+_UNUSABLE_STATUS_PREFIXES = (
+    "blocked",
+    "silent",
+    "no_change",
+    "script failed",
+    "monitor source failed",
 )
 
 
@@ -4586,13 +4594,28 @@ def _output_doc_header(text: str) -> str:
     return text[:cut]
 
 
+def _header_says_unusable(header: str) -> bool:
+    """True when the scheduler-written header marks a run that never answered."""
+    lines = [line.strip() for line in header.splitlines()]
+    if lines and lines[0].startswith("# Cron Job:") and lines[0].endswith(_FAILED_TITLE_SUFFIX):
+        return True
+    for line in lines[1:]:
+        if line.startswith(_GATE_SKIP_PREFIX):
+            return True
+        if line.startswith(_STATUS_PREFIX):
+            status = line[len(_STATUS_PREFIX):].strip().lower()
+            if status.startswith(_UNUSABLE_STATUS_PREFIXES):
+                return True
+    return False
+
+
 def _usable_context_from_output(text: str) -> str:
     """The injectable context of one saved output, or "" when that run left
     nothing to carry forward: a gate skip, a failure, a block, a silent tick,
     an empty/"(No response generated)" answer, or a ``[SILENT]`` answer
     (fork patch 2026-10-17, e2e review B#1)."""
     header = _output_doc_header((text or "").strip())
-    if any(marker in header for marker in _UNUSABLE_OUTPUT_HEADER_MARKERS):
+    if _header_says_unusable(header):
         return ""
     body = _context_from_output(text)
     if not body or body == "(No response generated)":

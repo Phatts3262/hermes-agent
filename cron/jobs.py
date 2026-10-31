@@ -31,7 +31,7 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Optional, Dict, List, Any, Set, Tuple, Union, Collection
@@ -1306,7 +1306,7 @@ def _schedule_cadence_seconds(schedule: Dict[str, Any]) -> Optional[float]:
         if expr in _cron_cadence_cache:
             return _cron_cadence_cache[expr]
         try:
-            base = _hermes_now()
+            base = _hermes_now().replace(tzinfo=None)
             it = croniter(expr, base)
             first = it.get_next(datetime)
             second = it.get_next(datetime)
@@ -1358,6 +1358,39 @@ def get_persisted_error_recovery_stats() -> Dict[str, Any]:
     }
 
 
+# Wider than any daylight-saving change, so an occurrence older than this
+# cannot own a stored instant.
+_CRON_MAX_CLOCK_SHIFT = timedelta(hours=3)
+
+
+def _cron_instant(wall: datetime, tz: Any) -> datetime:
+    """The real instant of a cron wall-clock time in ``tz``.
+
+    Going through UTC settles both clock changes: a time in the repeated hour
+    takes its first occurrence (fold=0) and a time in the skipped hour moves
+    forward by the gap (02:30 -> 03:30).
+    """
+    return wall.replace(tzinfo=tz).astimezone(timezone.utc).astimezone(tz)
+
+
+def _cron_next_fire(expr: str, base: datetime) -> datetime:
+    """The first occurrence of ``expr`` after ``base``, on the configured wall clock.
+
+    A cron expression means local wall time, so croniter gets a naive wall clock:
+    given an aware base it shifts the result by the offset change across a
+    clock change (croniter 6.0.0 ``_get_next``), and the wrong hour is then
+    re-anchored by the stale-schedule guard without firing. A base inside the
+    repeated hour skips wall times whose first occurrence has already passed,
+    so nothing fires twice.
+    """
+    tz = _hermes_now().tzinfo
+    occurrences = croniter(expr, base.astimezone(tz).replace(tzinfo=None))
+    while True:
+        fire = _cron_instant(occurrences.get_next(datetime), tz)
+        if fire.timestamp() > base.timestamp():
+            return fire
+
+
 def _cron_next_run_matches_expr(
     schedule: Dict[str, Any],
     next_run_dt: datetime,
@@ -1377,12 +1410,20 @@ def _cron_next_run_matches_expr(
     if not expr or not _ensure_croniter() or croniter is None:
         return True
     try:
-        # The last occurrence at-or-before the stored instant: base croniter
-        # a second past it so an exact occurrence is included, then compare
-        # at second granularity (croniter returns second-precision datetimes).
-        base = next_run_dt + timedelta(seconds=1)
-        prev = croniter(str(expr), base).get_prev(datetime)
-        return abs((prev - next_run_dt).total_seconds()) < 1.0
+        # The last wall-clock occurrence at-or-before the stored instant. A time in the
+        # skipped hour is stored moved forward, so an earlier occurrence inside the gap
+        # can also own the stored instant.
+        tz = _hermes_now().tzinfo
+        wall = next_run_dt.astimezone(tz).replace(tzinfo=None)
+        occurrences = croniter(str(expr), wall + timedelta(seconds=1))
+        prev = occurrences.get_prev(datetime)
+        if abs((prev - wall).total_seconds()) < 1.0:
+            return True
+        while wall - prev <= _CRON_MAX_CLOCK_SHIFT:
+            if abs(_cron_instant(prev, tz).timestamp() - next_run_dt.timestamp()) < 1.0:
+                return True
+            prev = occurrences.get_prev(datetime)
+        return False
     except Exception:
         return True
 
@@ -1442,9 +1483,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
                 base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
             except Exception:
                 base_time = now
-        cron = croniter(expr, base_time)
-        next_run = cron.get_next(datetime)
-        return next_run.isoformat()
+        return _cron_next_fire(expr, base_time).isoformat()
 
     return None
 

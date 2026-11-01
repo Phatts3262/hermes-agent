@@ -537,14 +537,14 @@ def test_overdue_across_the_repeated_hour_fires_once(temp_home, monkeypatch):
     [
         (
             "Africa/Johannesburg",
-            "0 21 * * *",
-            "2026-08-22T21:00:00+10:00",
-            "2026-08-22T13:00:30+02:00",
-            "2026-08-22T21:00:00+02:00",
+            "0 8,16 * * *",
+            "2026-08-22T16:00:00+10:00",
+            "2026-08-22T08:00:30+02:00",
+            "2026-08-22T16:00:00+02:00",
         ),
         (
             "America/New_York",
-            "0 7 * * 1-5",
+            "0 6,7 * * 1-5",
             "2026-11-02T07:00:00-04:00",
             "2026-11-02T06:00:30-05:00",
             "2026-11-02T07:00:00-05:00",
@@ -557,7 +557,9 @@ def test_offset_the_zone_never_had_waits_for_the_wall_clock(
 ):
     """The other side of the test above (#28934). A stored offset that is not the
     zone's at that instant reads hours early, so the job waits for its wall time
-    instead of firing early and then again."""
+    instead of firing early and then again. Each converted time is also an
+    occurrence of its expression: otherwise the stale-schedule guard re-anchors it
+    to the same answer, and the repair could be removed with this test still green."""
     from cron.jobs import get_job
 
     clock = _Clock(datetime.fromisoformat(scanned_at).astimezone(ZoneInfo(zone)))

@@ -3436,6 +3436,30 @@ class CLICommandsMixin:
         if self._apply_tui_skin_style():
             print("  Prompt + TUI colors updated.")
 
+    @staticmethod
+    def _editor_argv(editor: str, path: str, *, is_windows: bool) -> list[str]:
+        """The argv that opens ``path`` in ``editor``.
+
+        POSIX ``shlex.split`` eats a Windows path's backslashes, so Windows reads
+        the value as one program when it names a file, else in non-POSIX mode. The
+        program is resolved first: ``code`` is really ``code.cmd``, which a bare
+        argv cannot start, and a program that cannot be found raises instead of
+        reaching cmd.exe, which would hand a ``.sh`` to Windows' app picker.
+        """
+        import shlex
+        import shutil
+
+        if not is_windows:
+            return [*shlex.split(editor), path]
+        if os.path.isfile(editor):
+            argv = [editor]
+        else:
+            argv = [token.strip("\"'") for token in shlex.split(editor, posix=False)]
+        program = shutil.which(argv[0])
+        if program is None:
+            raise FileNotFoundError(f"editor not found: {argv[0]}")
+        return [program, *argv[1:], path]
+
     def _compose_in_editor(self, initial_text: str = "") -> str:
         """Open ``$VISUAL``/``$EDITOR`` on a temp markdown file and return the
         saved buffer (comment lines starting with ``#!`` stripped).
@@ -3463,9 +3487,12 @@ class CLICommandsMixin:
                 fh.write(header)
                 if initial_text:
                     fh.write(initial_text)
+            is_windows = os.name == "nt"
             try:
-                subprocess.call([*shlex.split(editor), path])
+                subprocess.call(self._editor_argv(editor, path, is_windows=is_windows))
             except Exception:
+                if is_windows:
+                    raise  # cmd.exe would put the app picker on the desktop
                 # Fall back to a bare invocation (editor value may not be a
                 # simple argv-splittable string on some platforms).
                 subprocess.call(f"{editor} {shlex.quote(path)}", shell=True)

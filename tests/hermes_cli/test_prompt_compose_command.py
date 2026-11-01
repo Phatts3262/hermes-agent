@@ -26,9 +26,7 @@ def _fake_editor(tmp_path: Path, body: str, mode: str = "append") -> str:
     """Return an ``$EDITOR`` value that mutates the file it is handed.
 
     The interpreter comes first, so the value is a real program on every host.
-    A bare script path is not: Windows cannot start one, ``_compose_in_editor``
-    falls back to ``shell=True``, and cmd.exe then asks Windows to open the file,
-    which puts "Select an app to open this .sh file" on the desktop.
+    A bare script path is not: Windows cannot start one.
     """
     script = tmp_path / "fake_editor.py"
     if mode == "append":
@@ -68,3 +66,22 @@ def test_empty_buffer_does_not_seed(monkeypatch, tmp_path):
     s = _Stub()
     s._handle_prompt_compose_command("/prompt")
     assert s._pending_agent_seed is None
+
+
+def test_a_windows_editor_path_with_spaces_stays_one_program(tmp_path):
+    folder = tmp_path / "Program Files"
+    folder.mkdir()
+    program = folder / "editor.exe"
+    program.write_text("", encoding="utf-8")
+    program.chmod(0o755)
+    argv = _Stub._editor_argv(str(program), "note.md", is_windows=True)
+    assert argv == [str(program), "note.md"]
+
+
+@pytest.mark.windows_only
+def test_a_script_windows_cannot_start_raises_and_never_reaches_the_shell(monkeypatch, tmp_path):
+    script = tmp_path / "editor.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("EDITOR", str(script))
+    with pytest.raises(OSError):
+        _Stub()._compose_in_editor("")

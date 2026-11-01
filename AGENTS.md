@@ -1218,8 +1218,9 @@ Hardening invariants:
   intentionally do not run during cron.
 - Cron fires are computed on the naive wall clock of the configured zone, or of
   the system when none is set (`_cron_next_fire`); never hand croniter an aware
-  base. Intervals and `in 30m` add real elapsed time (`_after_elapsed`), and the
-  due check compares instants, because same-zone datetimes compare wall clocks.
+  base. Intervals and `in 30m` add real elapsed time (`_after_elapsed`). Ages,
+  lateness and the due check all go through `_age_seconds`, because same-zone
+  datetimes compare and subtract wall clocks.
 
 Cron deliveries are **not** mirrored into the target gateway session —
 they land in their own cron session with a header/footer frame so the

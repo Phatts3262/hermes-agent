@@ -1069,10 +1069,10 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             # off from the user's wall-clock intent — far enough that one-shots
             # never become due and recurring jobs fire at the wrong time. Using
             # the configured zone makes "20:07" mean 20:07 on the same clock the
-            # scheduler checks against (#51021).
+            # scheduler checks against (#51021). The offset is the one on that
+            # date: with no timezone configured, today's knows no clock changes.
             if dt.tzinfo is None:
-                hermes_tz = _hermes_now().tzinfo
-                dt = dt.replace(tzinfo=hermes_tz)
+                dt = _cron_instant(dt, _cron_zone())
             return {
                 "kind": "once",
                 "run_at": dt.isoformat(),
@@ -1140,16 +1140,29 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt.astimezone(target_tz)
 
 
-def _timezone_offset_mismatch(stored: datetime, current: datetime) -> bool:
-    """Return True when a stored aware timestamp uses a different UTC offset.
+def _age_seconds(now: datetime, then: datetime) -> float:
+    """Real seconds from ``then`` to ``now``, negative when ``then`` is ahead.
+
+    Subtracting or comparing two datetimes that share a zone uses their wall
+    clocks, which is an hour out across a clock change and ignores ``fold``.
+    """
+    return now.timestamp() - then.timestamp()
+
+
+def _timezone_offset_mismatch(stored: datetime) -> bool:
+    """Return True when a stored timestamp's offset is not its zone's at that instant.
+
+    The zone is read at the stored instant, not now, so a clock change never
+    looks like a moved zone: 01:45-04:00 is right for New York that night,
+    whatever the offset has become since.
 
     Naive stored timestamps return False: they carry no offset to compare, and
     are normalized by ``_ensure_aware`` instead — they intentionally never take
     the offset-repair path.
     """
-    if stored.tzinfo is None or current.tzinfo is None:
+    if stored.tzinfo is None:
         return False
-    return stored.utcoffset() != current.utcoffset()
+    return stored.utcoffset() != stored.astimezone(_cron_zone()).utcoffset()
 
 
 def _stored_wall_clock_is_future(stored: datetime, current: datetime) -> bool:
@@ -1190,7 +1203,7 @@ def _recoverable_oneshot_run_at(
         run_at_dt = _ensure_aware(datetime.fromisoformat(run_at))
     except Exception:
         return None
-    if run_at_dt.timestamp() >= now.timestamp() - ONESHOT_GRACE_SECONDS:
+    if _age_seconds(now, run_at_dt) <= ONESHOT_GRACE_SECONDS:
         return run_at
     return None
 
@@ -1263,7 +1276,7 @@ def _job_is_stale_error_recurring(
         last_run_dt = _ensure_aware(datetime.fromisoformat(last_run))
     except (ValueError, TypeError):
         return False
-    age_seconds = (now - last_run_dt).total_seconds()
+    age_seconds = _age_seconds(now, last_run_dt)
     if age_seconds < 0:
         return False
     cadence_seconds = _schedule_cadence_seconds(schedule)
@@ -2850,7 +2863,7 @@ def _claim_is_live(claim: Any, now: datetime, ttl_seconds: float) -> bool:
     if not isinstance(claim, dict) or not claim.get("at"):
         return False
     try:
-        age = (now - _ensure_aware(datetime.fromisoformat(claim["at"]))).total_seconds()
+        age = _age_seconds(now, _ensure_aware(datetime.fromisoformat(claim["at"])))
     except (TypeError, ValueError):
         return False
     return 0 <= age < ttl_seconds
@@ -3571,7 +3584,7 @@ def _claim_job_for_fire_locked(
                     # "fresh" forever — the job becomes permanently unfireable
                     # and every manual `cron run` reports "already being
                     # fired". Treat future-dated claims as stale/overwritable.
-                    _age = (now - claimed_at).total_seconds()
+                    _age = _age_seconds(now, claimed_at)
                     if 0 <= _age < claim_ttl_seconds:
                         return False  # someone holds a fresh claim
                 except Exception:
@@ -3901,7 +3914,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                     # 0 <= age: a future-dated claim (clock/TZ skew across a
                     # restart) must be treated as stale, not eternally fresh,
                     # or the one-shot is skipped forever (#60703).
-                    _age = (now - claimed_at).total_seconds()
+                    _age = _age_seconds(now, claimed_at)
                     if 0 <= _age < _run_claim_ttl:
                         continue  # a fresh claim is held by an in-flight run
                 except (KeyError, ValueError, TypeError):
@@ -3961,23 +3974,20 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # Migration repair: a cron job persists next_run_at as an absolute
             # instant, but the cron expr describes local wall-clock intent. If the
             # configured/system timezone changed after persistence, the stored
-            # instant's offset no longer matches now's, and its converted time can
+            # offset is not the zone's at that instant, and its converted time can
             # look due hours early (21:00+10 -> 13:00+02). When the stored *wall
             # clock* is still in the future, recompute from the schedule so we fire
-            # at the intended local time instead of early-then-again.
+            # at the intended local time instead of early-then-again (#28934).
             #
-            # TRADE-OFF: this cannot distinguish a config/host TZ migration from a
-            # legitimate DST offset change. A DST boundary that satisfies all four
-            # conditions will recompute (and thus SKIP the pending occurrence, no
-            # catch-up) rather than fire it. Accepted: in the pure-migration case
-            # the recompute lands on the same wall-clock time later the same period,
-            # and DST-boundary collisions with a still-future stored wall clock are
-            # rare relative to the double-fire bug this prevents (#28934).
+            # A clock change is not a migration. 01:45-04:00 found overdue during
+            # the second 01:xx has a wall clock that reads as still ahead, but its
+            # offset was right at that instant, so it stays a late job and fires
+            # below instead of losing the occurrence here.
             if (
                 kind == "cron"
                 and not manual_run
-                and next_run_dt <= now
-                and _timezone_offset_mismatch(raw_next_run_dt, now)
+                and _age_seconds(now, next_run_dt) >= 0
+                and _timezone_offset_mismatch(raw_next_run_dt)
                 and _stored_wall_clock_is_future(raw_next_run_dt, now)
             ):
                 new_next = compute_next_run(schedule, now.isoformat())
@@ -4016,7 +4026,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             #     occurrence; a correctly-parked cron value is left as-is.
             if (
                 kind in ("cron", "interval")
-                and next_run_dt > now
+                and _age_seconds(now, next_run_dt) < 0
                 and _job_is_stale_error_recurring(job, schedule, now)
             ):
                 jid = job.get("id")
@@ -4033,7 +4043,11 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                         )
                     except (ValueError, TypeError):
                         recovered_next_dt = None
-                if recovered_next and recovered_next_dt is not None and recovered_next_dt < next_run_dt:
+                if (
+                    recovered_next
+                    and recovered_next_dt is not None
+                    and _age_seconds(next_run_dt, recovered_next_dt) > 0
+                ):
                     logger.warning(
                         "cron.persisted_error.recovered job='%s' id=%s — recurring "
                         "job wedged in stale last_status=error without re-firing for "
@@ -4052,10 +4066,12 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             needs_save = True
                             break
 
-            # Instants, not `<=`: same-zone datetimes compare wall clocks and ignore
-            # ``fold``, so an interval stored for the second 01:10 would read as due
-            # during the first.
-            if next_run_dt.timestamp() <= now.timestamp():
+            # Instants: same-zone datetimes compare and subtract wall clocks and
+            # ignore ``fold``, so an interval stored for the second 01:10 would read
+            # as due during the first, and a one-shot 20 s late across the skipped
+            # hour would read as an hour late and be retired without firing.
+            overdue_seconds = _age_seconds(now, next_run_dt)
+            if overdue_seconds >= 0:
 
                 # Stale-schedule guard (#93049): a direct jobs.json edit that
                 # changed schedule.expr leaves next_run_at computed under the
@@ -4093,7 +4109,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 if (
                     not manual_run
                     and kind in {"cron", "interval"}
-                    and (now - next_run_dt).total_seconds() > grace
+                    and overdue_seconds > grace
                 ):
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
@@ -4132,7 +4148,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 # them — only the due-scan acted differently and dispatched a
                 # wall-clock one-shot hours late (gateway down past the
                 # window, host asleep, hand-edited jobs.json).
-                if kind == "once" and (now - next_run_dt).total_seconds() > ONESHOT_GRACE_SECONDS:
+                if kind == "once" and overdue_seconds > ONESHOT_GRACE_SECONDS:
                     if not (job.get("run_claim") or job.get("fire_claim")):
                         # Nothing was ever dispatched — retire the record with
                         # a diagnostic so it stops being scanned and the miss

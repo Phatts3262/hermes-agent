@@ -816,7 +816,7 @@ in 1d   → Run once in 1 day
 30m          → Every 30 minutes (bare durations are recurring)
 every 30m    → Every 30 minutes
 every 2h     → Every 2 hours
-every 1d     → Every day
+every 1d     → Every 24 hours
 every hour   → Every hour (bare unit = 1)
 ```
 
@@ -844,7 +844,7 @@ Times accept `9am`, `9:30pm`, `14:00`, bare 24-hour hours (`at 7`), `noon`, and 
 0 0 * * 0       → Every Sunday at midnight
 ```
 
-Cron expressions follow the wall clock of your configured `timezone`, or of the server when none is set. When the clocks go back, a time in the repeated hour fires once, on its first occurrence, and a job that runs hourly or more often pauses for that repeated hour. When they go forward, a job scheduled in the skipped hour fires once that day, an hour later. Interval jobs (`every 30m`) count real elapsed time, so a clock change neither stretches nor shortens them.
+Cron expressions follow the wall clock of your configured `timezone`, or of the server when none is set. When the clocks go back, a time in the repeated hour fires once, on its first occurrence, and a job that runs hourly or more often pauses for that repeated hour. When they go forward, a job scheduled in the skipped hour fires once that day, an hour later. Interval jobs (`every 30m`) count real elapsed time, so a clock change neither stretches nor shortens them. That includes `every 1d`, which moves an hour on the wall clock at a change; use `every day at 9am` to hold the time.
 
 ### ISO timestamps
 

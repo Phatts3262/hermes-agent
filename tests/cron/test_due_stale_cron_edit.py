@@ -18,6 +18,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -156,10 +157,13 @@ def test_stale_next_run_skips_even_inside_catchup_window(temp_home, monkeypatch)
     assert get_job(jid)["next_run_at"].startswith(_MONDAY_0700.isoformat())
 
 
-def test_helper_reports_match_for_non_cron_and_unvalidatable(temp_home):
+def test_helper_reports_match_for_non_cron_and_unvalidatable(temp_home, monkeypatch):
     """Best-effort validation: non-cron kinds, missing expr, and croniter
     unavailable all report a match so the fire path is unchanged there."""
     from cron.jobs import _cron_next_run_matches_expr
+
+    # The guard reads the cron zone's clock, so the zone is pinned to the stamp's.
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: _SATURDAY_0700)
 
     assert _cron_next_run_matches_expr({"kind": "interval"}, _SATURDAY_0700) is True
     assert _cron_next_run_matches_expr({"kind": "cron"}, _SATURDAY_0700) is True
@@ -228,18 +232,29 @@ def _create_jobs(*exprs: str) -> dict:
     return {create_job(prompt="x", schedule=expr, name=expr)["id"]: expr for expr in exprs}
 
 
+def _at(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp).astimezone(_ET)
+
+
 def _walk(clock: _Clock, jobs: dict, minutes: int) -> dict:
-    """Tick minute by minute in the scheduler's order; return each expression's fires."""
-    from cron.jobs import advance_next_runs, get_due_jobs, mark_job_run
+    """Drive the real tick minute by minute, faking only the agent run and its
+    output; return each expression's fires."""
+    import cron.scheduler as scheduler
 
     fires = {expr: [] for expr in jobs.values()}
-    for _ in range(minutes):
-        due = get_due_jobs()
-        advance_next_runs([job["id"] for job in due])
-        for job in due:
-            fires[jobs[job["id"]]].append(clock.now.isoformat())
-            mark_job_run(job["id"], success=True)
-        clock.step()
+
+    def run(job: dict, **_kwargs) -> tuple:
+        fires[jobs[job["id"]]].append(clock.now.isoformat())
+        return True, "output", "response", None
+
+    with patch.object(scheduler, "_hermes_now", clock), patch.object(
+        scheduler, "run_job", run
+    ), patch.object(scheduler, "_deliver_result", lambda *_a, **_kw: None), patch.object(
+        scheduler, "save_job_output", lambda *_a: None
+    ):
+        for _ in range(minutes):
+            scheduler.tick(verbose=False, sync=True)
+            clock.step()
     return fires
 
 
@@ -265,9 +280,43 @@ def test_cron_computed_across_a_clock_change_fires_on_the_wall_clock(
 
     assert get_job(job_id)["next_run_at"] == stored
 
-    clock.now = datetime.fromisoformat(stored).astimezone(_ET) + timedelta(seconds=30)
+    clock.now = _at(stored) + timedelta(seconds=30)
 
     assert job_id in [job["id"] for job in get_due_jobs()]
+
+
+# The stamps the old code wrote. Each sits within the guard's walk back through a
+# skipped hour, so tolerance there must not let a wrong hour pass as a late run.
+_WRONG_HOUR_STAMPS = [
+    ("0 7 * * 1-5", "2026-11-02T08:00:00-05:00"),
+    ("15 16 * * 1-5", "2026-11-02T17:15:00-05:00"),
+    ("30 2 * * *", "2027-03-14T03:31:00-04:00"),
+]
+
+
+@pytest.mark.parametrize("expr, stored", _WRONG_HOUR_STAMPS)
+def test_guard_rejects_a_wrong_hour_inside_its_window(temp_home, monkeypatch, expr, stored):
+    from cron.jobs import _cron_next_run_matches_expr
+
+    monkeypatch.setattr("cron.jobs._hermes_now", _Clock(_at(stored)))
+
+    assert _cron_next_run_matches_expr({"kind": "cron", "expr": expr}, _at(stored)) is False
+
+
+def test_wrong_hour_stamp_reanchors_without_firing(temp_home, monkeypatch):
+    """The other half of the bug's trace: the stamp is dropped for the next real
+    occurrence, never fired an hour late."""
+    from cron.jobs import get_job
+
+    expr, stored = _WRONG_HOUR_STAMPS[0]
+    clock = _Clock(_at(stored) + timedelta(seconds=30))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = _write_cron_job(expr, datetime.fromisoformat(stored))
+
+    fires = _walk(clock, {job_id: expr}, 1)
+
+    assert fires[expr] == []
+    assert get_job(job_id)["next_run_at"] == "2026-11-03T07:00:00-05:00"
 
 
 def test_repeated_hour_fires_each_wall_time_once(temp_home, monkeypatch):
@@ -364,6 +413,106 @@ def test_stale_error_threshold_uses_the_wall_clock_gap(
     assert _job_is_stale_error_recurring(job, schedule, now) is wedged
 
 
+@pytest.mark.parametrize(
+    "last_run_at, now_at, minutes, wedged",
+    [
+        ("2026-11-01T01:50:00-04:00", "2026-11-01T01:20:00-05:00", 1, True),
+        ("2027-03-14T01:50:00-05:00", "2027-03-14T03:05:00-04:00", 30, False),
+    ],
+    ids=["clocks-back", "clocks-forward"],
+)
+def test_stale_error_age_counts_real_time(temp_home, monkeypatch, last_run_at, now_at, minutes, wedged):
+    """Thirty real minutes past a three-minute threshold read as negative across
+    the repeated hour; fifteen real minutes short of forty-five read as seventy-five
+    across the skipped hour, and a job merely waiting would be re-armed early."""
+    from cron.jobs import _job_is_stale_error_recurring
+
+    monkeypatch.setattr("cron.jobs._hermes_now", _Clock(_at(now_at)))
+    job = {"id": "wedged", "last_status": "error", "last_run_at": last_run_at}
+    schedule = {"kind": "interval", "minutes": minutes}
+
+    assert _job_is_stale_error_recurring(job, schedule, _at(now_at)) is wedged
+
+
+def test_stale_error_recovery_takes_a_run_parked_in_the_repeated_hour(temp_home, monkeypatch):
+    """A next run at the second 01:10 is still ahead at the first 01:50, though its
+    wall clock reads as past, so a wedged job is re-armed instead of left waiting."""
+    from cron.jobs import create_job, get_due_jobs, load_jobs, save_jobs
+
+    clock = _Clock(_at("2026-11-01T01:50:00-04:00"))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = create_job(prompt="x", schedule="every 1m", name="wedged")["id"]
+    jobs = load_jobs()
+    jobs[0].update(
+        last_status="error",
+        last_run_at="2026-10-31T22:00:00-04:00",
+        next_run_at="2026-11-01T01:10:00-05:00",
+    )
+    save_jobs(jobs)
+
+    assert job_id in [job["id"] for job in get_due_jobs()]
+
+
+@pytest.mark.parametrize(
+    "stored, tick_at, caught_up",
+    [
+        ("2027-03-14T01:59:00-05:00", "2027-03-14T03:00:20-04:00", 0),
+        ("2026-11-01T01:59:00-04:00", "2026-11-01T01:40:00-05:00", 1),
+    ],
+    ids=["80s-late-across-the-skipped-hour", "41m-late-across-the-repeated-hour"],
+)
+def test_catch_up_counts_real_lateness(temp_home, monkeypatch, stored, tick_at, caught_up):
+    """`59 * * * *` has a half-hour grace. The metric must count the real delay
+    against it, not the wall clocks' difference."""
+    from cron.jobs import get_catch_up_occurrence_count, get_due_jobs
+
+    monkeypatch.setattr("cron.jobs._hermes_now", _Clock(_at(tick_at)))
+    job_id = _write_cron_job("59 * * * *", datetime.fromisoformat(stored))
+
+    assert job_id in [job["id"] for job in get_due_jobs()]
+    assert get_catch_up_occurrence_count() == caught_up
+
+
+@pytest.mark.parametrize(
+    "claimed_at, scanned_at",
+    [
+        ("2026-11-01T01:59:30-04:00", "2026-11-01T01:00:30-05:00"),
+        ("2027-03-14T01:59:30-05:00", "2027-03-14T03:00:30-04:00"),
+    ],
+    ids=["clocks-back", "clocks-forward"],
+)
+def test_claims_stay_fresh_across_a_clock_change(temp_home, monkeypatch, claimed_at, scanned_at):
+    """Both claims are a real minute old. A negative age means clock skew and an
+    age past the TTL means a dead claimant, so wall-clock arithmetic hands a run in
+    flight to a second process, for up to an hour after the clocks go back."""
+    from cron.jobs import (
+        _claim_is_live,
+        claim_job_for_fire,
+        create_job,
+        get_due_jobs,
+        load_jobs,
+        save_jobs,
+    )
+
+    clock = _Clock(_at(claimed_at))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    recurring = create_job(prompt="x", schedule="every 5m", name="recurring")["id"]
+    one_shot = create_job(prompt="x", schedule="in 1m", name="one-shot")["id"]
+    assert claim_job_for_fire(recurring)
+    jobs = load_jobs()
+    for job in jobs:
+        if job["id"] == one_shot:
+            job["run_claim"] = {"at": claimed_at, "by": "other-process"}
+            job["next_run_at"] = claimed_at
+    save_jobs(jobs)
+
+    clock.now = _at(scanned_at)
+
+    assert not claim_job_for_fire(recurring)
+    assert one_shot not in [job["id"] for job in get_due_jobs()]
+    assert _claim_is_live({"at": claimed_at}, clock.now, 300)
+
+
 def test_overdue_across_the_repeated_hour_fires_once(temp_home, monkeypatch):
     """A job due at the first 01:45 and found overdue during the second 01:xx is
     late, not stale: its stored wall clock reads as still ahead, and the zone-change
@@ -376,11 +525,49 @@ def test_overdue_across_the_repeated_hour_fires_once(temp_home, monkeypatch):
     assert get_job(job_id)["next_run_at"] == "2026-11-01T01:45:00-04:00"
 
     # The gateway was down from before 01:45 EDT until 01:10 EST.
-    clock.now = datetime.fromisoformat("2026-11-01T01:10:00-05:00").astimezone(_ET)
+    clock.now = _at("2026-11-01T01:10:00-05:00")
 
     assert job_id in [job["id"] for job in get_due_jobs()]
     mark_job_run(job_id, success=True)
     assert get_job(job_id)["next_run_at"] == "2026-11-02T01:45:00-05:00"
+
+
+@pytest.mark.parametrize(
+    "zone, expr, stored, scanned_at, repaired",
+    [
+        (
+            "Africa/Johannesburg",
+            "0 21 * * *",
+            "2026-08-22T21:00:00+10:00",
+            "2026-08-22T13:00:30+02:00",
+            "2026-08-22T21:00:00+02:00",
+        ),
+        (
+            "America/New_York",
+            "0 7 * * 1-5",
+            "2026-11-02T07:00:00-04:00",
+            "2026-11-02T06:00:30-05:00",
+            "2026-11-02T07:00:00-05:00",
+        ),
+    ],
+    ids=["moved-zone", "stale-offset-after-a-clock-change"],
+)
+def test_offset_the_zone_never_had_waits_for_the_wall_clock(
+    temp_home, monkeypatch, zone, expr, stored, scanned_at, repaired
+):
+    """The other side of the test above (#28934). A stored offset that is not the
+    zone's at that instant reads hours early, so the job waits for its wall time
+    instead of firing early and then again."""
+    from cron.jobs import get_job
+
+    clock = _Clock(datetime.fromisoformat(scanned_at).astimezone(ZoneInfo(zone)))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = _write_cron_job(expr, datetime.fromisoformat(stored))
+
+    fires = _walk(clock, {job_id: expr}, 1)
+
+    assert fires[expr] == []
+    assert get_job(job_id)["next_run_at"] == repaired
 
 
 @pytest.mark.parametrize(
@@ -394,11 +581,11 @@ def test_interval_counts_real_time_across_a_clock_change(temp_home, monkeypatch,
     the first. 95m lands past the skipped hour, where wall-clock addition falls short."""
     clock = _Clock(start)
     monkeypatch.setattr("cron.jobs._hermes_now", clock)
-    jobs = _create_jobs("every 1m", "every 30m", "every 95m")
+    jobs = _create_jobs("every 5m", "every 30m", "every 95m")
 
     fires = _walk(clock, jobs, 100)
 
-    for minutes in (1, 30, 95):
+    for minutes in (5, 30, 95):
         stamps = [start.isoformat(), *fires[f"every {minutes}m"]]
         instants = [datetime.fromisoformat(stamp).timestamp() for stamp in stamps]
         gaps = {later - earlier for earlier, later in zip(instants, instants[1:])}
@@ -419,6 +606,34 @@ def test_one_shot_in_a_duration_counts_real_time(temp_home, monkeypatch):
     fires = _walk(clock, {job["id"]: "in 30m"}, 40)
 
     assert fires["in 30m"] == ["2026-11-01T01:20:00-05:00"]
+
+
+@pytest.mark.parametrize(
+    "run_at, tick_at, fires",
+    [
+        ("2027-03-14T01:59:50-05:00", "2027-03-14T03:00:10-04:00", True),
+        ("2027-03-14T01:59:30-05:00", "2027-03-14T03:00:20-04:00", True),
+        ("2026-11-01T01:50:00-04:00", "2026-11-01T01:31:00-05:00", False),
+        ("2026-11-01T01:50:00-04:00", "2026-11-01T01:51:00-05:00", False),
+    ],
+    ids=["20s-late-spring", "50s-late-spring", "41m-late-autumn", "61m-late-autumn"],
+)
+def test_one_shot_grace_counts_real_time(temp_home, monkeypatch, run_at, tick_at, fires):
+    """Seconds late across the skipped hour is inside the two-minute grace, though
+    the wall clocks read an hour apart, so the job fires. Past the grace across the
+    repeated hour it never fires, though the wall clocks read it as barely late."""
+    from cron.jobs import create_job, get_job
+
+    clock = _Clock(_at(run_at) - timedelta(minutes=1))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = create_job(prompt="x", schedule=run_at, name="once")["id"]
+
+    clock.now = _at(tick_at)
+    fired = _walk(clock, {job_id: "once"}, 1)
+
+    assert fired["once"] == ([_at(tick_at).isoformat()] if fires else [])
+    if not fires:
+        assert get_job(job_id) is None
 
 
 _NO_ZONE_SCENARIO = """
@@ -446,8 +661,10 @@ print(job["id"] in [due["id"] for due in jobs.get_due_jobs()])
         ("0 7 * * 1-5", "2027-03-12T12:00:00+00:00", "2027-03-15T11:00:30+00:00", "2027-03-15T07:00:00-04:00"),
         ("0 7 * * 1-5", "2026-10-30T12:00:00+00:00", "2026-11-02T12:00:30+00:00", "2026-11-02T07:00:00-05:00"),
         ("30 2 * * *", "2027-03-13T12:00:00+00:00", "2027-03-14T07:30:30+00:00", "2027-03-14T03:30:00-04:00"),
+        ("45 1 * * *", "2026-11-01T04:50:00+00:00", "2026-11-01T06:10:00+00:00", "2026-11-01T01:45:00-04:00"),
+        ("2026-11-02T09:00:00", "2026-10-31T16:00:00+00:00", "2026-11-02T14:00:30+00:00", "2026-11-02T09:00:00-05:00"),
     ],
-    ids=["clocks-forward", "clocks-back", "skipped-hour"],
+    ids=["clocks-forward", "clocks-back", "skipped-hour", "overdue-across-the-repeated-hour", "naive-timestamp"],
 )
 def test_no_configured_timezone_keeps_the_system_clock_rules(
     temp_home, expr, computed_at, fires_at, stored

@@ -268,6 +268,20 @@ class TestExternalCronProviderStatus:
         assert "Gateway is not running" not in out
 
 
+def test_status_next_run_is_the_earliest_instant_not_the_lowest_string(capsys):
+    """Across the repeated hour stored offsets differ, so 01:59-04:00 is the true
+    next run and 01:10-05:00 only sorts first. A malformed stamp must not win."""
+    cron_cli._print_active_jobs_summary(
+        [
+            {"next_run_at": "not a time"},
+            {"next_run_at": "2026-11-01T01:10:00-05:00"},
+            {"next_run_at": "2026-11-01T01:59:00-04:00"},
+        ]
+    )
+
+    assert "2026-11-01T01:59:00-04:00" in capsys.readouterr().out
+
+
 def test_cron_list_warns_when_gateway_not_running(monkeypatch, capsys):
     monkeypatch.setattr(
         "cron.jobs.list_jobs",

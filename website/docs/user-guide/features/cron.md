@@ -844,7 +844,7 @@ Times accept `9am`, `9:30pm`, `14:00`, bare 24-hour hours (`at 7`), `noon`, and 
 0 0 * * 0       → Every Sunday at midnight
 ```
 
-Cron expressions follow the wall clock of your configured `timezone`, or of the server when none is set. When the clocks go back, a time in the repeated hour fires once, on its first occurrence, and a job that runs hourly or more often pauses for that repeated hour. When they go forward, a job scheduled in the skipped hour fires once that day, an hour later. Interval jobs (`every 30m`) count real elapsed time, so a clock change neither stretches nor shortens them. That includes `every 1d`, which moves an hour on the wall clock at a change; use `every day at 9am` to hold the time.
+Cron expressions follow the wall clock of your configured `timezone`, or of the server when none is set. A zone with no clock changes, such as UTC, never meets the rules below, so a server on UTC needs `timezone` set for them to apply to your local time. When the clocks go back, a time in the repeated hour fires once, on its first occurrence, and a job that runs hourly or more often pauses for that repeated hour. When they go forward, a job scheduled in the skipped hour fires once that day, an hour later. Interval jobs (`every 30m`) count real elapsed time, so a clock change neither stretches nor shortens them, and their fire times gain or lose the hour on the wall clock. That includes `every 1d`; use `every day at 9am` to hold the time.
 
 ### ISO timestamps
 

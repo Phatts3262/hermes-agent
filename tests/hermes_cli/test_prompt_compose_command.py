@@ -7,9 +7,9 @@ uses). These drive a fake editor subprocess to verify read-back, header
 stripping, seeding, and the empty-buffer cancel path.
 """
 
-import os
-import stat
-import tempfile
+import shlex
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -22,17 +22,26 @@ class _Stub(CLICommandsMixin):
         self._pending_agent_seed = None
 
 
-def _fake_editor(body: str, mode: str = "append") -> str:
-    """Write a tiny shell 'editor' that mutates the file it is handed."""
-    f = tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False)
+def _fake_editor(tmp_path: Path, body: str, mode: str = "append") -> str:
+    """Return an ``$EDITOR`` value that mutates the file it is handed.
+
+    The interpreter comes first, so the value is a real program on every host.
+    A bare script path is not: Windows cannot start one, ``_compose_in_editor``
+    falls back to ``shell=True``, and cmd.exe then asks Windows to open the file,
+    which puts "Select an app to open this .sh file" on the desktop.
+    """
+    script = tmp_path / "fake_editor.py"
     if mode == "append":
-        f.write("#!/usr/bin/env bash\n")
-        f.write(f"cat >> \"$1\" <<'EOF'\n{body}\nEOF\n")
+        text = body + "\n"
+        script.write_text(
+            "import sys\n"
+            "with open(sys.argv[1], 'a', encoding='utf-8') as fh:\n"
+            f"    fh.write({text!r})\n",
+            encoding="utf-8",
+        )
     else:  # clear
-        f.write("#!/usr/bin/env bash\n: > \"$1\"\n")
-    f.close()
-    os.chmod(f.name, os.stat(f.name).st_mode | stat.S_IEXEC)
-    return f.name
+        script.write_text("import sys\nopen(sys.argv[1], 'w').close()\n", encoding="utf-8")
+    return shlex.join([Path(sys.executable).as_posix(), script.as_posix()])
 
 
 @pytest.fixture(autouse=True)
@@ -46,16 +55,16 @@ def test_command_registered():
     assert resolve_command("compose").name == "prompt"
 
 
-def test_compose_reads_and_strips_header(monkeypatch):
-    monkeypatch.setenv("EDITOR", _fake_editor("Refactor the auth module.\nUse pytest."))
+def test_compose_reads_and_strips_header(monkeypatch, tmp_path):
+    monkeypatch.setenv("EDITOR", _fake_editor(tmp_path, "Refactor the auth module.\nUse pytest."))
     out = _Stub()._compose_in_editor("")
     assert "Refactor the auth module." in out
     assert "Use pytest." in out
     assert "#!" not in out  # the instructional header is stripped
 
 
-def test_empty_buffer_does_not_seed(monkeypatch):
-    monkeypatch.setenv("EDITOR", _fake_editor("", mode="clear"))
+def test_empty_buffer_does_not_seed(monkeypatch, tmp_path):
+    monkeypatch.setenv("EDITOR", _fake_editor(tmp_path, "", mode="clear"))
     s = _Stub()
     s._handle_prompt_compose_command("/prompt")
     assert s._pending_agent_seed is None

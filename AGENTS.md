@@ -1216,8 +1216,10 @@ Hardening invariants:
   across processes.
 - Cron sessions pass `skip_memory=True` by default; memory providers
   intentionally do not run during cron.
-- Cron fires are computed on the configured zone's naive wall clock
-  (`_cron_next_fire`); never hand croniter an aware base.
+- Cron fires are computed on the naive wall clock of the configured zone, or of
+  the system when none is set (`_cron_next_fire`); never hand croniter an aware
+  base. Intervals and `in 30m` add real elapsed time (`_after_elapsed`), and the
+  due check compares instants, because same-zone datetimes compare wall clocks.
 
 Cron deliveries are **not** mirrored into the target gateway session —
 they land in their own cron session with a header/footer frame so the

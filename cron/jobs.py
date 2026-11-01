@@ -1095,7 +1095,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             raise ValueError(
                 f"Invalid duration '{duration_str}' after 'in '. Use e.g. 'in 30m', 'in 2h'."
             )
-        run_at = _hermes_now() + timedelta(minutes=minutes)
+        run_at = _after_elapsed(_hermes_now(), timedelta(minutes=minutes))
         return {
             "kind": "once",
             "run_at": run_at.isoformat(),
@@ -1190,7 +1190,7 @@ def _recoverable_oneshot_run_at(
         run_at_dt = _ensure_aware(datetime.fromisoformat(run_at))
     except Exception:
         return None
-    if run_at_dt >= now - timedelta(seconds=ONESHOT_GRACE_SECONDS):
+    if run_at_dt.timestamp() >= now.timestamp() - ONESHOT_GRACE_SECONDS:
         return run_at
     return None
 
@@ -1363,14 +1363,37 @@ def get_persisted_error_recovery_stats() -> Dict[str, Any]:
 _CRON_MAX_CLOCK_SHIFT = timedelta(hours=3)
 
 
-def _cron_instant(wall: datetime, tz: Any) -> datetime:
-    """The real instant of a cron wall-clock time in ``tz``.
+def _cron_zone() -> Any:
+    """The zone of the cron wall clock, or ``None`` for the system's own rules.
 
-    Going through UTC settles both clock changes: a time in the repeated hour
-    takes its first occurrence (fold=0) and a time in the skipped hour moves
-    forward by the gap (02:30 -> 03:30).
+    With no timezone configured ``_hermes_now()`` carries today's fixed offset,
+    which knows no clock changes. ``astimezone(None)`` applies the system's rules.
     """
-    return wall.replace(tzinfo=tz).astimezone(timezone.utc).astimezone(tz)
+    now = _hermes_now()
+    if isinstance(now.tzinfo, timezone) and now.utcoffset() == now.astimezone().utcoffset():
+        return None
+    return now.tzinfo
+
+
+def _cron_instant(wall: datetime, tz: Any) -> datetime:
+    """The real instant of a cron wall-clock time in ``tz`` (``None``: the system's).
+
+    A timestamp settles both clock changes: a time in the repeated hour takes
+    its first occurrence (fold=0) and a time in the skipped hour moves forward
+    by the gap (02:30 -> 03:30). Do not use ``astimezone`` here: a naive time in
+    the gap comes back an hour early, not late.
+    """
+    stamp = wall.replace(tzinfo=tz).timestamp()
+    return datetime.fromtimestamp(stamp, timezone.utc).astimezone(tz)
+
+
+def _after_elapsed(start: datetime, delta: timedelta) -> datetime:
+    """``start`` plus real elapsed time.
+
+    Adding to an aware datetime moves its wall clock, so an interval would stretch
+    by the hour the clocks go back. Going through UTC keeps its length.
+    """
+    return (start.astimezone(timezone.utc) + delta).astimezone(start.tzinfo)
 
 
 def _cron_next_fire(expr: str, base: datetime) -> datetime:
@@ -1383,7 +1406,7 @@ def _cron_next_fire(expr: str, base: datetime) -> datetime:
     repeated hour skips wall times whose first occurrence has already passed,
     so nothing fires twice.
     """
-    tz = _hermes_now().tzinfo
+    tz = _cron_zone()
     occurrences = croniter(expr, base.astimezone(tz).replace(tzinfo=None))
     while True:
         fire = _cron_instant(occurrences.get_next(datetime), tz)
@@ -1413,7 +1436,7 @@ def _cron_next_run_matches_expr(
         # The last wall-clock occurrence at-or-before the stored instant. A time in the
         # skipped hour is stored moved forward, so an earlier occurrence inside the gap
         # can also own the stored instant.
-        tz = _hermes_now().tzinfo
+        tz = _cron_zone()
         wall = next_run_dt.astimezone(tz).replace(tzinfo=None)
         occurrences = croniter(str(expr), wall + timedelta(seconds=1))
         prev = occurrences.get_prev(datetime)
@@ -1452,12 +1475,12 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         if last_run_at:
             try:
                 last = _ensure_aware(datetime.fromisoformat(last_run_at))
-                next_run = last + timedelta(minutes=minutes)
+                next_run = _after_elapsed(last, timedelta(minutes=minutes))
             except Exception:
-                next_run = now + timedelta(minutes=minutes)
+                next_run = _after_elapsed(now, timedelta(minutes=minutes))
         else:
             # First run is now + interval
-            next_run = now + timedelta(minutes=minutes)
+            next_run = _after_elapsed(now, timedelta(minutes=minutes))
         return next_run.isoformat()
 
     elif kind == "cron":
@@ -4029,7 +4052,10 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             needs_save = True
                             break
 
-            if next_run_dt <= now:
+            # Instants, not `<=`: same-zone datetimes compare wall clocks and ignore
+            # ``fold``, so an interval stored for the second 01:10 would read as due
+            # during the first.
+            if next_run_dt.timestamp() <= now.timestamp():
 
                 # Stale-schedule guard (#93049): a direct jobs.json edit that
                 # changed schedule.expr leaves next_run_at computed under the

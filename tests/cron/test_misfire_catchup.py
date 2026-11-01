@@ -9,7 +9,8 @@ gateway housekeeping, claims and fires those jobs after a grace window.
 
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -103,6 +104,15 @@ class TestFireOverdueJobs:
         create_job(prompt="p", schedule="every 1h")  # next_run_at in future
         provider = RecordingProvider()
         assert fire_overdue_jobs(provider) == 0
+
+    def test_overdue_is_real_time_across_a_clock_change(self, tmp_cron_dir, monkeypatch):
+        """Stored for the second 01:10, a job is 20 minutes ahead at the first
+        01:50, not 40 minutes behind as same-zone subtraction reads it."""
+        first_pass = datetime(2026, 11, 1, 1, 50, tzinfo=ZoneInfo("America/New_York"))
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: first_pass)
+        job = create_job(prompt="p", schedule="every 20m")
+        assert job["next_run_at"] == "2026-11-01T01:10:00-05:00"
+        assert fire_overdue_jobs(RecordingProvider()) == 0
 
     def test_paused_job_not_fired(self, tmp_cron_dir):
         from cron.jobs import pause_job

@@ -13,7 +13,11 @@ the E2EE-over-mocks discipline for file-touching code.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -335,14 +339,133 @@ def test_skipped_hour_fires_once_moved_forward(temp_home, monkeypatch, expr, mov
     assert fires[expr] == [moved_forward]
 
 
-def test_cadence_is_the_wall_clock_gap(temp_home, monkeypatch):
-    """The gap across a clock change is the wall-clock one, so the catch-up
-    window of a daily job does not shrink by the hour the clocks moved."""
-    from cron.jobs import _schedule_cadence_seconds
+@pytest.mark.parametrize(
+    "hours_since_last_run, wedged",
+    [(25.5, False), (26.5, True)],
+)
+def test_stale_error_threshold_uses_the_wall_clock_gap(
+    temp_home, monkeypatch, hours_since_last_run, wedged
+):
+    """A daily job counts as wedged after a day plus its two-hour grace. Measured
+    across a clock change the gap read 23 hours, so the threshold fell by one and
+    a job merely waiting for its next run was re-armed."""
+    from cron.jobs import _job_is_stale_error_recurring
 
-    monkeypatch.setattr(
-        "cron.jobs._hermes_now", _Clock(datetime(2026, 10, 31, 12, 0, tzinfo=_ET))
-    )
+    now = datetime(2026, 10, 31, 12, 0, tzinfo=_ET)
+    monkeypatch.setattr("cron.jobs._hermes_now", _Clock(now))
     monkeypatch.setattr("cron.jobs._cron_cadence_cache", {})
+    schedule = {"kind": "cron", "expr": "0 7 * * *"}
+    job = {
+        "id": "wedged",
+        "last_status": "error",
+        "last_run_at": (now - timedelta(hours=hours_since_last_run)).isoformat(),
+    }
 
-    assert _schedule_cadence_seconds({"kind": "cron", "expr": "0 7 * * *"}) == 86400
+    assert _job_is_stale_error_recurring(job, schedule, now) is wedged
+
+
+def test_overdue_across_the_repeated_hour_fires_once(temp_home, monkeypatch):
+    """A job due at the first 01:45 and found overdue during the second 01:xx is
+    late, not stale: its stored wall clock reads as still ahead, and the zone-change
+    repair above the due check must not take that for a moved zone and drop it."""
+    from cron.jobs import get_due_jobs, get_job, mark_job_run
+
+    clock = _Clock(datetime(2026, 11, 1, 0, 50, tzinfo=_ET))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = next(iter(_create_jobs("45 1 * * *")))
+    assert get_job(job_id)["next_run_at"] == "2026-11-01T01:45:00-04:00"
+
+    # The gateway was down from before 01:45 EDT until 01:10 EST.
+    clock.now = datetime.fromisoformat("2026-11-01T01:10:00-05:00").astimezone(_ET)
+
+    assert job_id in [job["id"] for job in get_due_jobs()]
+    mark_job_run(job_id, success=True)
+    assert get_job(job_id)["next_run_at"] == "2026-11-02T01:45:00-05:00"
+
+
+@pytest.mark.parametrize(
+    "start",
+    [datetime(2026, 11, 1, 1, 30, tzinfo=_ET), datetime(2027, 3, 14, 1, 30, tzinfo=_ET)],
+    ids=["clocks-back", "clocks-forward"],
+)
+def test_interval_counts_real_time_across_a_clock_change(temp_home, monkeypatch, start):
+    """An interval is elapsed time, so neither change stretches or shortens it. The
+    second half is the due check: a stored second 01:00 must not read as due during
+    the first. 95m lands past the skipped hour, where wall-clock addition falls short."""
+    clock = _Clock(start)
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    jobs = _create_jobs("every 1m", "every 30m", "every 95m")
+
+    fires = _walk(clock, jobs, 100)
+
+    for minutes in (1, 30, 95):
+        stamps = [start.isoformat(), *fires[f"every {minutes}m"]]
+        instants = [datetime.fromisoformat(stamp).timestamp() for stamp in stamps]
+        gaps = {later - earlier for earlier, later in zip(instants, instants[1:])}
+        assert gaps == {minutes * 60.0}
+
+
+def test_one_shot_in_a_duration_counts_real_time(temp_home, monkeypatch):
+    """`in 30m` at the first 01:50 means the second 01:20, and the one-shot grace
+    check must not read that as already past and refuse the job."""
+    from cron.jobs import create_job
+
+    clock = _Clock(datetime(2026, 11, 1, 1, 50, tzinfo=_ET))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job = create_job(prompt="x", schedule="in 30m", name="once")
+
+    assert job["next_run_at"] == "2026-11-01T01:20:00-05:00"
+
+    fires = _walk(clock, {job["id"]: "in 30m"}, 40)
+
+    assert fires["in 30m"] == ["2026-11-01T01:20:00-05:00"]
+
+
+_NO_ZONE_SCENARIO = """
+import sys
+from datetime import datetime, timezone
+
+import cron.jobs as jobs
+
+expr = sys.argv[1]
+computed_at, fires_at = (datetime.fromisoformat(value) for value in sys.argv[2:4])
+clock = {"now": computed_at}
+# hermes_time.now() with no timezone configured: today's fixed offset.
+jobs._hermes_now = lambda: clock["now"].astimezone()
+
+job = jobs.create_job(prompt="x", schedule=expr, name="no-zone")
+print(job["next_run_at"])
+clock["now"] = fires_at
+print(job["id"] in [due["id"] for due in jobs.get_due_jobs()])
+"""
+
+
+@pytest.mark.parametrize(
+    "expr, computed_at, fires_at, stored",
+    [
+        ("0 7 * * 1-5", "2027-03-12T12:00:00+00:00", "2027-03-15T11:00:30+00:00", "2027-03-15T07:00:00-04:00"),
+        ("0 7 * * 1-5", "2026-10-30T12:00:00+00:00", "2026-11-02T12:00:30+00:00", "2026-11-02T07:00:00-05:00"),
+        ("30 2 * * *", "2027-03-13T12:00:00+00:00", "2027-03-14T07:30:30+00:00", "2027-03-14T03:30:00-04:00"),
+    ],
+    ids=["clocks-forward", "clocks-back", "skipped-hour"],
+)
+def test_no_configured_timezone_keeps_the_system_clock_rules(
+    temp_home, expr, computed_at, fires_at, stored
+):
+    """With no timezone set the clock carries today's fixed offset, which knows no
+    clock changes, so the job would store the wrong hour and vanish. It runs in a child
+    because a process reads the system zone's rules from TZ once, at start."""
+    root = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_TIMEZONE"}
+    env.update(TZ="EST5EDT", HERMES_HOME=str(temp_home), PYTHONPATH=str(root))
+
+    done = subprocess.run(
+        [sys.executable, "-c", _NO_ZONE_SCENARIO, expr, computed_at, fires_at],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == [stored, "True"]

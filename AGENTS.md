@@ -1220,7 +1220,9 @@ Hardening invariants:
   the system when none is set (`_cron_next_fire`); never hand croniter an aware
   base. Intervals and `in 30m` add real elapsed time (`_after_elapsed`). Claim
   and error ages, lateness and the due check go through `_age_seconds`, because
-  same-zone datetimes compare and subtract wall clocks.
+  same-zone datetimes compare and subtract wall clocks. Stored stamps carry their
+  offset, so the run ledger and the incident list order them through `julianday`,
+  never as text: the repeated hour inverts string order.
 
 Cron deliveries are **not** mirrored into the target gateway session —
 they land in their own cron session with a header/footer frame so the

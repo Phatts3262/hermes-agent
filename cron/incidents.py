@@ -37,6 +37,9 @@ from hermes_time import now as _hermes_now
 EXECUTIONS_FILE: Optional[Path] = None
 
 INCIDENT_STATES = ("detected", "alerted", "closed")
+# Stamps carry their offset, so text order is not time order across a clock change
+# (the same rule as ``cron.executions._NEWEST_FIRST``).
+_NEWEST_ACTIVITY_FIRST = "julianday(last_seen_at) DESC, last_seen_at DESC, id DESC"
 _FAILURE_TYPE_ORDER = (
     ("rate_limit", (r"\b429\b", "rate limit", "usage limit", "quota")),
     ("timeout", ("timeout", "timed out")),
@@ -268,13 +271,12 @@ def list_incidents(state: Optional[str] = None) -> List[Dict[str, Any]]:
     with _transaction() as conn:
         if state is None:
             rows = conn.execute(
-                "SELECT * FROM cron_incidents "
-                "ORDER BY last_seen_at DESC, id DESC"
+                f"SELECT * FROM cron_incidents ORDER BY {_NEWEST_ACTIVITY_FIRST}"
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM cron_incidents WHERE state=? "
-                "ORDER BY last_seen_at DESC, id DESC",
+                f"ORDER BY {_NEWEST_ACTIVITY_FIRST}",
                 (state,),
             ).fetchall()
     return [dict(row) for row in rows]

@@ -238,7 +238,8 @@ def _at(stamp: str) -> datetime:
 
 def _walk(clock: _Clock, jobs: dict, minutes: int) -> dict:
     """Drive the real tick minute by minute, faking only the agent run and its
-    output; return each expression's fires."""
+    output; return each expression's fires. The run ledger reads the same clock."""
+    import cron.executions as executions
     import cron.scheduler as scheduler
 
     fires = {expr: [] for expr in jobs.values()}
@@ -248,8 +249,10 @@ def _walk(clock: _Clock, jobs: dict, minutes: int) -> dict:
         return True, "output", "response", None
 
     with patch.object(scheduler, "_hermes_now", clock), patch.object(
-        scheduler, "run_job", run
-    ), patch.object(scheduler, "_deliver_result", lambda *_a, **_kw: None), patch.object(
+        executions, "_hermes_now", clock
+    ), patch.object(scheduler, "run_job", run), patch.object(
+        scheduler, "_deliver_result", lambda *_a, **_kw: None
+    ), patch.object(
         scheduler, "save_job_output", lambda *_a: None
     ):
         for _ in range(minutes):
@@ -572,6 +575,24 @@ def test_offset_the_zone_never_had_waits_for_the_wall_clock(
     assert get_job(job_id)["next_run_at"] == repaired
 
 
+def test_missed_run_under_a_moved_zone_fires_once(temp_home, monkeypatch):
+    """The repair above waits only while the stored wall time is ahead. Here 16:00
+    has passed on the new zone's clock too, so the run was genuinely missed: it
+    fires now, once, instead of being dropped for the next occurrence."""
+    from cron.jobs import get_job
+
+    expr = "0 8,16 * * *"
+    zone = ZoneInfo("Africa/Johannesburg")
+    clock = _Clock(datetime.fromisoformat("2026-08-22T16:30:00+02:00").astimezone(zone))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    job_id = _write_cron_job(expr, datetime.fromisoformat("2026-08-22T16:00:00+10:00"))
+
+    fires = _walk(clock, {job_id: expr}, 1)
+
+    assert fires[expr] == ["2026-08-22T16:30:00+02:00"]
+    assert get_job(job_id)["next_run_at"] == "2026-08-23T08:00:00+02:00"
+
+
 @pytest.mark.parametrize(
     "start",
     [datetime(2026, 11, 1, 1, 30, tzinfo=_ET), datetime(2027, 3, 14, 1, 30, tzinfo=_ET)],
@@ -592,6 +613,31 @@ def test_interval_counts_real_time_across_a_clock_change(temp_home, monkeypatch,
         instants = [datetime.fromisoformat(stamp).timestamp() for stamp in stamps]
         gaps = {later - earlier for earlier, later in zip(instants, instants[1:])}
         assert gaps == {minutes * 60.0}
+
+
+def test_run_ledger_reads_in_real_order_through_the_repeated_hour(temp_home, monkeypatch):
+    """An interval now runs through the repeated hour, and its stamps change offset
+    there. Text order puts the first 01:55 above the second 01:15, so one failed run
+    would read as the job's latest for the rest of the hour, and retention would
+    throw away the newest rows first. Past the second 01:59 text order agrees with
+    real order again, so this walk has to stop inside the hour."""
+    from cron.executions import latest_execution, latest_executions, list_executions
+
+    monkeypatch.setattr("cron.executions.MAX_TERMINAL_EXECUTIONS", 7)
+    clock = _Clock(_at("2026-11-01T01:30:00-04:00"))
+    monkeypatch.setattr("cron.jobs._hermes_now", clock)
+    jobs = _create_jobs("every 5m")
+    job_id = next(iter(jobs))
+
+    fires = _walk(clock, jobs, 50)["every 5m"]
+
+    assert fires[-1] == "2026-11-01T01:15:00-05:00"
+    assert latest_execution(job_id)["claimed_at"] == fires[-1]
+    assert latest_executions([job_id])[job_id]["claimed_at"] == fires[-1]
+    newest_first = [row["claimed_at"] for row in list_executions(job_id=job_id)]
+    assert newest_first == fires[:-8:-1]
+    older = list_executions(job_id=job_id, before_claimed_at="2026-11-01T01:05:00-05:00")
+    assert [row["claimed_at"] for row in older] == newest_first[3:]
 
 
 def test_one_shot_in_a_duration_counts_real_time(temp_home, monkeypatch):

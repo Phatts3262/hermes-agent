@@ -289,7 +289,12 @@ def test_named_profile_reroute_defers_limit_to_final_process(monkeypatch, tmp_pa
         exec_call.update(executable=executable, argv=argv, env=env)
         raise _ExecCalled
 
+    def stop_at_popen(argv, env=None):
+        stop_at_exec(argv[0], argv, env)
+
     monkeypatch.setattr(cli_main.os, "execvpe", stop_at_exec)
+    # Windows reroutes through Popen + wait, so execvpe alone leaves it real.
+    monkeypatch.setattr(cli_main.subprocess, "Popen", stop_at_popen)
 
     args = SimpleNamespace(
         status=False,

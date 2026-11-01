@@ -7,6 +7,8 @@ launching profile preselected. `--isolated` opts out.
 """
 import sys
 import types
+from pathlib import Path
+
 import pytest
 
 
@@ -29,25 +31,41 @@ def _args(**kw):
 class TestUnifiedDashboardRouting:
 
 
-    def test_profile_launch_reexecs_machine_dashboard(self, main_mod, monkeypatch):
+    def test_profile_launch_reexecs_machine_dashboard(
+        self, main_mod, monkeypatch, tmp_path
+    ):
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        # With HERMES_HOME unset the machine root is the platform default, which
+        # is a real home on a developer's box: keep it inside this test.
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setattr(
             "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
         )
         monkeypatch.setattr(main_mod, "_dashboard_listening", lambda host, port: False)
-        execs = []
+        launches = []
 
         def fake_exec(exe, argv, env):
-            execs.append((exe, argv, env))
+            launches.append((exe, argv, env))
             raise SystemExit(0)  # execvpe never returns
 
+        class FakePopen:
+            """Windows reroutes through Popen + wait, so execvpe alone leaves it real."""
+
+            def __init__(self, argv, env=None):
+                launches.append((argv[0], argv, env))
+
+            def wait(self):
+                return 0
+
         monkeypatch.setattr(main_mod.os, "execvpe", fake_exec)
+        monkeypatch.setattr(main_mod.subprocess, "Popen", FakePopen)
 
         with pytest.raises(SystemExit):
             main_mod.cmd_dashboard(_args())
 
-        assert len(execs) == 1
-        exe, argv, env = execs[0]
+        assert len(launches) == 1
+        exe, argv, env = launches[0]
         assert exe == sys.executable
         # Pinned to the default profile + launching profile preselected.
         assert "-p" in argv and argv[argv.index("-p") + 1] == "default"
@@ -59,6 +77,7 @@ class TestUnifiedDashboardRouting:
         # test below for why we resolve explicitly instead of popping.
         from hermes_constants import get_default_hermes_root
         assert env.get("HERMES_HOME") == str(get_default_hermes_root())
+        assert Path(env["HERMES_HOME"]).is_relative_to(tmp_path)
 
 
     def test_desktop_profile_backend_skips_machine_dashboard_reroute(self, main_mod, monkeypatch):

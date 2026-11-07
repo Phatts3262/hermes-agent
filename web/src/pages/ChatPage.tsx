@@ -40,6 +40,7 @@ import { copyTextToClipboard } from "@/lib/clipboard";
 import { normalizeSessionTitle } from "@/lib/chat-title";
 import { createPtyCompositionForwarder } from "@/lib/pty-composition";
 import { PtyResumeSanitizer } from "@/lib/pty-resume-sanitizer";
+import { attachPtyTouchScroll } from "@/lib/pty-touch-scroll";
 import {
   PTY_CONNECTING_TIMEOUT_MS,
   PTY_RECONNECT_INPUT_MESSAGE,
@@ -161,17 +162,12 @@ function terminalTierWidthPx(host: HTMLElement | null): number {
 }
 
 function terminalFontSizeForWidth(layoutWidthPx: number): number {
-  if (layoutWidthPx < 300) return 7;
-  if (layoutWidthPx < 360) return 8;
-  if (layoutWidthPx < 420) return 9;
-  if (layoutWidthPx < 520) return 10;
-  if (layoutWidthPx < 720) return 11;
-  if (layoutWidthPx < 1024) return 12;
+  if (layoutWidthPx < 1024) return 13;
   return 14;
 }
 
 function terminalLineHeightForWidth(layoutWidthPx: number): number {
-  return layoutWidthPx < 1024 ? 1.02 : 1.15;
+  return layoutWidthPx < 1024 ? 1.2 : 1.15;
 }
 
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
@@ -180,6 +176,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const windowsHostRef = useRef<false | { backend: "conpty"; buildNumber?: number } | null>(null);
   const stickToBottomRef = useRef(true);
   // Exposed to the main metrics-sync effect so it can refit the terminal
   // the moment `isActive` flips back to true (display:none → display:flex
@@ -554,6 +551,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Browser-embedded chat runs the TUI in inline mode. Keep transcript
       // history in xterm.js so the browser wheel can scroll it directly.
       scrollback: 5000,
+      windowsPty: windowsHostRef.current || {},
       theme: terminalTheme,
     });
     termRef.current = term;
@@ -822,6 +820,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       sendComposedText(data);
     });
     term.open(host);
+    const touchScrollCleanup = attachPtyTouchScroll(host, term);
 
     // IME composition guard (fixes #52111).
     //
@@ -853,6 +852,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       textarea.setAttribute("autocorrect", "off");
       textarea.setAttribute("autocapitalize", "off");
       textarea.setAttribute("spellcheck", "false");
+      // iOS zooms the whole page when focusing inputs with small text.
+      // This hidden input is independent of the visible terminal font.
+      textarea.style.fontSize = "16px";
 
       const isMobileLike =
         typeof navigator !== "undefined" &&
@@ -1182,16 +1184,38 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       }, PTY_TICKET_TIMEOUT_MS);
 
       let url: string;
+      let windowsHost = windowsHostRef.current;
+      let hostStatsTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        url = await api.buildWsUrl("/api/pty", params);
+        [url, windowsHost] = await Promise.all([
+          api.buildWsUrl("/api/pty", params),
+          windowsHostRef.current !== null ? windowsHostRef.current : Promise.race([
+            api.getSystemStats().then((stats) => {
+              const build = Number(stats.os_version.split(".")[2]);
+              const pty = stats.os === "Windows" ? {
+                backend: "conpty" as const,
+                ...(Number.isFinite(build) ? { buildNumber: build } : {}),
+              } : false;
+              windowsHostRef.current = pty;
+              if (pty && !unmounting) term.options.windowsPty = pty;
+              return pty;
+            }).catch(() => null),
+            new Promise<null>((resolve) => {
+              hostStatsTimer = setTimeout(() => resolve(null), 750);
+            }),
+          ]),
+        ]);
       } catch (err) {
         if (unmounting || ticketSuperseded) return;
         console.warn(`[chat] PTY ticket request failed: ${err}`);
         failTicketAttempt();
         return;
+      } finally {
+        if (hostStatsTimer) clearTimeout(hostStatsTimer);
       }
       if (unmounting || ticketSuperseded) return;
       clearTicketTimer();
+      if (windowsHostRef.current) term.options.windowsPty = windowsHostRef.current;
 
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
@@ -1262,6 +1286,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // in-place redraws through untouched. See pty-resume-sanitizer.ts.
     const decoder = new TextDecoder();
     const sanitizer = new PtyResumeSanitizer();
+    // ConPTY clears cells even during ordinary viewport/keyboard resizes.
+    // Removing those clears leaves stale text over the new frame. Keep the
+    // historical POSIX replay workaround, but preserve Windows erases.
+    // If optional diagnostics time out, preserve the terminal protocol rather
+    // than risking corruption by assuming this phone is attached to POSIX.
+    if (windowsHost !== false) sanitizer.endEraseSuppression();
     const beginResumeReplay = () => {
       stickToBottomRef.current = true;
       if (!eraseSuppressionTimer) {
@@ -1283,6 +1313,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
 
     ws.onmessage = (ev) => {
+      if (unmounting || wsRef.current !== ws) return;
+      if (windowsHostRef.current) sanitizer.endEraseSuppression();
       if (typeof ev.data === "string") {
         // The active-session fallback (no `?resume=` on the URL) tells us
         // via a one-off JSON control frame that a replay is starting (#93518,
@@ -1324,6 +1356,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
 
     ws.onclose = (ev) => {
+      // A late close from the previous connection must not clear the new
+      // socket reference or its connecting timeout.
+      if (unmounting || wsRef.current !== ws) return;
       // Drain buffered sanitizer state. A buffered partial escape is dropped
       // (writing an unterminated CSI would wedge xterm's parser); a buffered
       // newline run is emitted collapsed.
@@ -1338,9 +1373,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       wsRef.current = null;
       connectInFlightRef.current = false;
       clearConnectingTimer();
-      if (unmounting) {
-        return;
-      }
       // Surface the real cause to the browser console on every close so a
       // "chat won't connect" report can be diagnosed without server access.
       // The server sends a machine-parseable reason on every rejection (see
@@ -1495,7 +1527,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       });
     })();
 
-    term.focus();
+    if (!window.matchMedia("(pointer: coarse)").matches) term.focus();
 
     return () => {
       unmounting = true;
@@ -1508,6 +1540,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       onResizeDisposable?.dispose();
       onScrollDisposable?.dispose();
       mobileInputCleanup?.();
+      touchScrollCleanup();
       compositionForwarder.dispose();
       host.removeEventListener("paste", handleBrowserPaste, true);
       host.removeEventListener("dragover", handleBrowserDragOver, true);
@@ -1619,7 +1652,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           active !== document.body &&
           host !== null &&
           !host.contains(active);
-        if (!focusIsElsewhereInChatPage) {
+        if (!focusIsElsewhereInChatPage && !window.matchMedia("(pointer: coarse)").matches) {
           termRef.current?.focus();
         }
       });
@@ -1739,6 +1772,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           id="chat-side-panel"
           role="complementary"
           aria-label={modelToolsLabel}
+          inert={!mobilePanelOpen}
+          aria-hidden={!mobilePanelOpen}
           className={cn(
             "font-mondwest fixed top-0 right-0 z-[60] flex h-dvh max-h-dvh w-64 min-w-0 flex-col antialiased",
             "border-l border-current/20 text-midground",

@@ -507,7 +507,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Uses resolve_command() so aliases and case variants are
                     # covered without maintaining a separate cache.
                     if resolve_command(cmd_name) is not None:
-                        logger.warning(
+                        # Fork patch (2026-10-04): INFO, not WARNING. The
+                        # collision is a handled outcome (the skill stays
+                        # loadable via /skill) and it repeated on every
+                        # gateway start for `plan` and `trading`.
+                        logger.info(
                             "Skill %r generates slash command '/%s' which "
                             "collides with a core Hermes command; skipping "
                             "auto-registration. Use '/skill %s' instead.",

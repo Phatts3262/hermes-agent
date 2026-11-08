@@ -70,6 +70,29 @@ def test_a_marker_that_says_not_now_still_warns(caplog):
     assert records and all(r.levelno == logging.WARNING for r in records)
 
 
+@pytest.mark.parametrize(("listed", "level"), [(True, logging.DEBUG), (False, logging.WARNING)])
+def test_a_check_the_operator_declared_unused_is_quiet(monkeypatch, caplog, listed, level):
+    """Mutation: drop the `_declared_unused` call in the registry -> the listed
+    row goes RED; make it return True always -> the unlisted row goes RED."""
+    import hermes_cli.config as config
+
+    def fn():
+        return False
+
+    fn.__name__ = fn.__qualname__ = "_check_never_configured"
+    names = ["_check_never_configured"] if listed else ["_some_other_check"]
+    monkeypatch.setattr(
+        config, "load_config_readonly", lambda: {"tools": {"quiet_unavailable": names}}
+    )
+    caplog.set_level(logging.DEBUG, logger="tools.registry")
+
+    assert _run_uncached(fn) is False
+    records = [r for r in caplog.records if "_check_never_configured" in r.getMessage()]
+    assert records and all(r.levelno == level for r in records), [
+        (r.levelname, r.getMessage()) for r in records
+    ]
+
+
 def test_a_raising_check_fn_is_never_quiet(caplog):
     def fn():
         raise RuntimeError("probe blew up")

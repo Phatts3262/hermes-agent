@@ -30,7 +30,7 @@ A misformatted schedule silently defaults to one-shot or is rejected entirely. T
 | `0 9 * * 1` | 9:00 AM every Monday |
 | `every 2h` | Every 2 hours from now |
 | `30m` | 30 minutes from now |
-| `2025-06-01T09:00:00` | June 1, 2025 at 9:00 AM UTC |
+| `2025-06-01T09:00:00` | June 1, 2025 at 9:00 AM in your configured timezone |
 
 If the job fires once and then disappears from the list, it's a one-shot schedule (`30m`, `1d`, or an ISO timestamp) — expected behavior.
 
@@ -44,11 +44,11 @@ If you're expecting jobs to fire automatically, you need a running gateway (`her
 
 ### Check 4: Check the system clock and timezone
 
-Jobs use the local timezone. If your machine's clock is wrong or in a different timezone than expected, jobs will fire at the wrong times. Verify:
+Jobs follow `timezone` in `config.yaml`, or the system's timezone when that is unset; see [how schedules follow the clock](/user-guide/features/cron#cron-expressions). If your machine's clock is wrong or `timezone` is not what you expect, jobs will fire at the wrong times. Verify:
 
 ```bash
 date
-hermes cron list   # Compare next_run times with local time
+hermes cron list   # Compare next_run times with the time in your configured timezone
 ```
 
 ---

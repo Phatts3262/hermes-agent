@@ -95,7 +95,7 @@ Cron 任务默认与任何代码仓库脱离运行——不加载 `AGENTS.md`、
 
 ```bash
 # 独立 CLI（schedule 和 prompt 为位置参数）
-hermes cron create "every 1d at 09:00" \
+hermes cron create "every day at 9am" \
   "Audit open PRs, summarize CI health, and post to #eng" \
   --workdir /home/me/projects/acme
 ```
@@ -104,7 +104,7 @@ hermes cron create "every 1d at 09:00" \
 # 在聊天中，通过 cronjob 工具
 cronjob(
     action="create",
-    schedule="every 1d at 09:00",
+    schedule="every day at 9am",
     workdir="/home/me/projects/acme",
     prompt="Audit open PRs, summarize CI health, and post to #eng",
 )
@@ -127,7 +127,7 @@ cronjob(
 
 ```bash
 # 将任务固定到 `night-ops` profile，无论在哪里调度
-hermes cron create "every 1d at 03:00" \
+hermes cron create "every day at 3am" \
   "Tail the security log and flag anomalies" \
   --profile night-ops
 ```
@@ -136,7 +136,7 @@ hermes cron create "every 1d at 03:00" \
 # 在聊天中，通过 cronjob 工具
 cronjob(
     action="create",
-    schedule="every 1d at 03:00",
+    schedule="every day at 3am",
     prompt="Tail the security log and flag anomalies",
     profile="night-ops",
 )

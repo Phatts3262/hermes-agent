@@ -26,6 +26,11 @@ EXECUTIONS_FILE: Optional[Path] = None
 # fork patch 2026-09-26, review P-12).
 MAX_TERMINAL_EXECUTIONS = 200
 _TERMINAL_STATES = ("completed", "failed", "unknown")
+# Stamps carry their offset, so text order is not time order: when the clocks go
+# back the second 01:10 sorts below the first 01:50. ``julianday`` reads the offset
+# but keeps only milliseconds, so the text breaks a tie inside one. A stamp SQLite
+# cannot read gives NULL, which sorts last.
+_NEWEST_FIRST = "julianday(claimed_at) DESC, claimed_at DESC, id DESC"
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
@@ -134,10 +139,10 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
     In-flight rows are never pruned."""
     limit = max(0, int(MAX_TERMINAL_EXECUTIONS))
     conn.execute(
-        """DELETE FROM executions WHERE id IN (
+        f"""DELETE FROM executions WHERE id IN (
              SELECT id FROM (
                SELECT id, ROW_NUMBER() OVER (
-                 PARTITION BY job_id ORDER BY claimed_at DESC, id DESC
+                 PARTITION BY job_id ORDER BY {_NEWEST_FIRST}
                ) AS rn
                FROM executions
                WHERE status IN ('completed','failed','unknown')
@@ -252,21 +257,22 @@ def list_executions(
     *, job_id: Optional[str] = None, limit: int = 50,
     before_claimed_at: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return indexed, newest-first execution history with cursor pagination."""
+    """Return newest-first execution history with cursor pagination."""
     clauses: List[str] = []
     params: List[Any] = []
     if job_id is not None:
         clauses.append("job_id=?")
         params.append(str(job_id))
     if before_claimed_at is not None:
-        clauses.append("claimed_at < ?")
-        params.append(str(before_claimed_at))
+        # The same two keys as ``_NEWEST_FIRST``, so a page starts where the last ended.
+        clauses.append("(julianday(claimed_at), claimed_at) < (julianday(?), ?)")
+        params.extend([str(before_claimed_at), str(before_claimed_at)])
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     params.append(max(1, min(int(limit), 500)))
     with _transaction() as conn:
         rows = conn.execute(
             "SELECT * FROM executions" + where
-            + " ORDER BY claimed_at DESC, id DESC LIMIT ?",
+            + f" ORDER BY {_NEWEST_FIRST} LIMIT ?",
             params,
         ).fetchall()
     return [dict(row) for row in rows]
@@ -278,18 +284,25 @@ def latest_execution(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def latest_executions(job_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Load latest execution for many jobs in one indexed query."""
+    """Load latest execution for many jobs in one indexed query.
+
+    One window pass, because ``_NEWEST_FIRST`` cannot read the index's order: a
+    subquery per row would sort a job's whole history once for each of its rows.
+    """
     clean = [str(job_id) for job_id in dict.fromkeys(job_ids) if job_id]
     if not clean:
         return {}
     placeholders = ",".join("?" for _ in clean)
     with _transaction() as conn:
         rows = conn.execute(
-            f"""SELECT e.* FROM executions e
-                WHERE e.job_id IN ({placeholders})
-                  AND e.id=(SELECT e2.id FROM executions e2
-                            WHERE e2.job_id=e.job_id
-                            ORDER BY e2.claimed_at DESC, e2.id DESC LIMIT 1)""",
+            f"""SELECT * FROM executions WHERE id IN (
+                  SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                      PARTITION BY job_id ORDER BY {_NEWEST_FIRST}
+                    ) AS newest
+                    FROM executions WHERE job_id IN ({placeholders})
+                  ) WHERE newest = 1
+                )""",
             clean,
         ).fetchall()
     return {row["job_id"]: dict(row) for row in rows}

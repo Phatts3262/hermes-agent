@@ -8,6 +8,7 @@ pause/resume/run/remove, status, and tick.
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -540,6 +541,15 @@ def cron_status():
     print()
 
 
+def _run_instant(stamp: str) -> float:
+    """Sort key for a stored run time. ISO strings do not sort by time once their
+    offsets differ, as they do across the repeated hour. Malformed stamps go last."""
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 def _print_active_jobs_summary(jobs) -> None:
     """Print the '<N> active job(s)' + next-run line shared by every status
     path (built-in ticker AND external provider)."""
@@ -547,7 +557,7 @@ def _print_active_jobs_summary(jobs) -> None:
         next_runs = [j.get("next_run_at") for j in jobs if j.get("next_run_at")]
         print(f"  {len(jobs)} active job(s)")
         if next_runs:
-            print(f"  Next run: {min(next_runs)}")
+            print(f"  Next run: {min(next_runs, key=_run_instant)}")
     else:
         print("  No active jobs")
 

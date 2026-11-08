@@ -416,7 +416,8 @@ def fire_overdue_jobs(
             due_dt = _ensure_aware(datetime.fromisoformat(next_run_at))
         except (ValueError, TypeError):
             continue
-        overdue_seconds = (now - due_dt).total_seconds()
+        # Instants: same-zone subtraction reads the wall clock across a clock change.
+        overdue_seconds = now.timestamp() - due_dt.timestamp()
         if overdue_seconds < grace_minutes * 60:
             continue
         job_id = str(job.get("id") or "")

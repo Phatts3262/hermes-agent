@@ -361,6 +361,25 @@ def _run_check_fn_uncached(fn: Callable, *, unresolved_scope: bool = False) -> b
         return False
 
 
+def _declared_unused(fn: Callable) -> bool:
+    """True when config.yaml lists this check_fn under ``tools.quiet_unavailable``.
+
+    Fork patch (2026-10-04): integrations the operator never configured (Feishu,
+    Yuanbao, Spotify, Home Assistant, kanban, ...) logged one WARNING each at
+    every gateway start, so errors.log was never empty on a clean start. A name
+    listed there is a loss the operator has declared expected; it is logged at
+    DEBUG like a superseded check. Anything not listed keeps the WARNING, and an
+    unreadable config quiets nothing.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        names = (load_config_readonly().get("tools") or {}).get("quiet_unavailable") or ()
+        return getattr(fn, "__name__", "") in {str(n) for n in names}
+    except Exception:
+        return False
+
+
 def _check_fn_cached(fn: Callable) -> bool:
     """Return bool(fn()), TTL-cached across calls."""
     now = time.monotonic()
@@ -417,6 +436,8 @@ def _check_fn_cached(fn: Callable) -> bool:
             designed = (not raised) and callable(_quiet) and bool(_quiet())
         except Exception:
             designed = False
+        if not designed and not raised:
+            designed = _declared_unused(fn)
         (logger.debug if designed else logger.warning)(
             "check_fn %s %s; dependent tools will be unavailable this turn%s",
             getattr(fn, "__qualname__", fn),

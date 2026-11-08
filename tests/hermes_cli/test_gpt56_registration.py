@@ -41,7 +41,11 @@ class TestGpt56PricingRoute:
         route = resolve_billing_route("gpt-5.6-sol", provider="openai")
         entry = _lookup_official_docs_pricing(route)
         assert entry is not None
-        assert entry.input_cost_per_million == Decimal("5.00")
+        # Reachable and priced; the rate itself is pinned by the golden-cost
+        # test in tests/agent/test_usage_pricing.py, not by a snapshot here.
+        assert entry.source == "official_docs_snapshot"
+        assert entry.input_cost_per_million is not None
+        assert entry.input_cost_per_million > Decimal("0")
 
 
     def test_cache_write_is_1_25x_input_for_56_series(self):

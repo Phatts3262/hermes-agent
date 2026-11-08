@@ -165,7 +165,7 @@ Cron jobs default to running detached from any repo — no `AGENTS.md`, `CLAUDE.
 
 ```bash
 # Standalone CLI (schedule and prompt are positional)
-hermes cron create "every 1d at 09:00" \
+hermes cron create "every day at 9am" \
   "Audit open PRs, summarize CI health, and post to #eng" \
   --workdir /home/me/projects/acme
 ```
@@ -174,7 +174,7 @@ hermes cron create "every 1d at 09:00" \
 # From a chat, via the cronjob tool
 cronjob(
     action="create",
-    schedule="every 1d at 09:00",
+    schedule="every day at 9am",
     workdir="/home/me/projects/acme",
     prompt="Audit open PRs, summarize CI health, and post to #eng",
 )
@@ -816,7 +816,7 @@ in 1d   → Run once in 1 day
 30m          → Every 30 minutes (bare durations are recurring)
 every 30m    → Every 30 minutes
 every 2h     → Every 2 hours
-every 1d     → Every day
+every 1d     → Every 24 hours
 every hour   → Every hour (bare unit = 1)
 ```
 
@@ -843,6 +843,8 @@ Times accept `9am`, `9:30pm`, `14:00`, bare 24-hour hours (`at 7`), `noon`, and 
 30 8 1 * *      → First of every month at 8:30 AM
 0 0 * * 0       → Every Sunday at midnight
 ```
+
+Cron expressions follow the wall clock of your configured `timezone`, or of the server when none is set. A zone with no clock changes, such as UTC, never meets the rules below, so a server on UTC needs `timezone` set for them to apply to your local time. When the clocks go back, a time in the repeated hour fires once, on its first occurrence, and a job that runs hourly or more often pauses for that repeated hour. When they go forward, a job scheduled in the skipped hour fires once that day, an hour later. Interval jobs (`every 30m`) count real elapsed time, so a clock change neither stretches nor shortens them, and their fire times gain or lose the hour on the wall clock. That includes `every 1d`; use `every day at 9am` to hold the time.
 
 ### ISO timestamps
 

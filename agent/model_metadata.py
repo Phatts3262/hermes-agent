@@ -549,6 +549,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok-2-vision": 8192,      # grok-2-vision, -1212, -latest
     "grok-4-fast": 2000000,     # grok-4-fast-(non-)reasoning, also matches -reasoning
     "grok-4.20": 2000000,       # grok-4.20-0309-(non-)reasoning, -multi-agent-0309
+    "grok-4.7": 500000,         # grok-4.7 — 500K context (docs.x.ai, read 2026-11-08)
     "grok-4.6": 500000,         # grok-4.6 — 500K context (OpenRouter / docs.x.ai)
     "grok-4.5": 500000,         # grok-4.5, grok-4.5-latest — 500K context per docs.x.ai
     "grok-4.3": 1000000,        # grok-4.3, grok-4.3-latest — 1M context per docs.x.ai
@@ -2217,6 +2218,7 @@ _PRE_CATALOG_STALE_KEYS = frozenset({
     "minimax-m3",    # 1M; older builds persisted the "minimax" catch-all (204,800)
     "grok-4.3",      # 1M; pre-2026-05-15 builds persisted the "grok-4" catch-all (256,000)
     "grok-4.6",      # 500K; pre-catalog builds persisted the "grok-4" catch-all (256,000)
+    "grok-4.7",      # 500K; pre-2026-11-08 builds persisted the "grok-4" catch-all (256,000)
     "grok-4-fast",   # 2M; pre-2026-04-10 builds fell through to the 256K probe fallback
     "grok-4.20",     # 2M; pre-2026-04-10 builds fell through to the 256K probe fallback
     "qwen3.6-plus",  # 1M; pre-2026-05-17 builds persisted the "qwen" catch-all (131,072)

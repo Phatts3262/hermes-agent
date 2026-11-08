@@ -439,4 +439,31 @@ class TestContinuityFlag:
         assert "Reported: story A" in prompt
         assert "previous run" in prompt.lower()
 
+    def test_self_continuity_skips_a_gate_skip_and_a_failed_run(self, cron_env):
+        """e2e review 2026-10-17 B#1: the baseline is the last run that answered."""
+        from cron.jobs import create_job, OUTPUT_DIR
+        from cron.scheduler import _build_job_prompt
+        import os
+
+        job = create_job(prompt="Intel", schedule="every 1h", context_from="self")
+        out_dir = OUTPUT_DIR / job["id"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        docs = [
+            ("2026-10-15_12-00-00.md", "# Cron Job: Intel\n\n**Job ID:** x\n\n## Prompt\n\np\n\n"
+             "## Response\n\nDELIVERED INTEL CYCLE\n"),
+            ("2026-10-16_15-03-16.md", "# Cron Job: Intel (FAILED)\n\n**Job ID:** x\n\n## Prompt\n\n"
+             "raw numbers 1.23\n\n## Error\n\n```\nHTTP 429\n```\n"),
+            ("2026-10-16_15-20-00.md", "# Cron Job: Intel\n\n**Job ID:** x\n\n"
+             "Script gate returned `wakeAgent=false` — agent skipped.\n"),
+        ]
+        for mtime, (name, text) in enumerate(docs, start=1):
+            path = out_dir / name
+            path.write_text(text, encoding="utf-8")
+            os.utime(path, (1000 * mtime, 1000 * mtime))
+
+        prompt = _build_job_prompt(job)
+        assert "DELIVERED INTEL CYCLE" in prompt
+        assert "raw numbers" not in prompt
+        assert "Script gate returned" not in prompt
+
 

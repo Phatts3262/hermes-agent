@@ -17,6 +17,9 @@ DEFAULT_PRICING = {"input": 0.0, "output": 0.0}
 _ZERO = Decimal("0")
 _ONE_MILLION = Decimal("1000000")
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
+_OPENAI_API_HOST = "api.openai.com"
+_MODELS_DEV_SOURCE_URL = "https://models.dev/api.json"
+_MODELS_DEV_NOTE = "estimated from the cached models.dev registry, not an official price snapshot"
 
 # Sub-cent cost threshold: below $0.01, render at 4 decimal places so
 # the display is non-zero (e.g. $0.0046 instead of $0.00). See #79220.
@@ -64,6 +67,7 @@ CostSource = Literal[
     "provider_generation_api",
     "provider_models_api",
     "official_docs_snapshot",
+    "models_dev_snapshot",
     "user_override",
     "custom_contract",
     "none",
@@ -137,6 +141,7 @@ class PricingEntry:
     input_cost_per_million_above: Optional[Decimal] = None
     output_cost_per_million_above: Optional[Decimal] = None
     cache_read_cost_per_million_above: Optional[Decimal] = None
+    cache_write_cost_per_million_above: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -157,52 +162,160 @@ _UTC_NOW = lambda: datetime.now(timezone.utc)
 # semantics are stable enough to encode exactly.
 _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # ── OpenAI GPT-5.6 series (Sol/Terra/Luna) ───────────────────────────
-    # Announced in limited preview 2026-06-26; GA 2026-07-09 at the same
-    # rates (Sol $5/$30, Terra $2.50/$15, Luna $1/$6 per 1M in/out). Cache
-    # writes are billed at 1.25x the uncached input rate; cache reads get the
-    # standard 90% discount (0.10x input, confirmed: Sol $0.50/M cached).
-    # Note: "Sol Fast mode" ($12.5/$75, up to 750 tok/s via Cerebras) is a
-    # separate serving tier, not covered by these entries. The "-pro"
-    # variants (high-effort modes, GA alongside base tiers) bill at the
-    # SAME per-token rates and are aliased onto these entries below the
-    # dict (they cost more per task by consuming more tokens, not by a
-    # higher rate — verified against OpenRouter's live pricing 2026-07-09).
-    # Source: https://openai.com/index/previewing-gpt-5-6-sol/
+    # Rates from OpenAI's API pricing page, read 2026-10-17 (standard tier,
+    # per 1M tokens: input / cached input / cache writes / output). Short
+    # context is <=272K input tokens; above that the long-context rates apply
+    # to the whole request. The July preview post's rates (Sol $5/$30, Terra
+    # $2.50/$15, Luna $1/$6) are superseded — Luna was over-stated 5x (fork
+    # patch 2026-10-17, e2e review B#14). The page marks Sol's rate as
+    # promotional until November 30, 2026 (read 2026-11-08); re-check then.
+    # "Sol Fast mode" is a separate serving tier, not covered here. The page
+    # lists no GPT-5.6 "-pro" rows; the "-pro" / "-900k" aliases below the
+    # dict keep billing at these base rates.
+    # Source: https://developers.openai.com/api/docs/pricing
     (
         "openai",
         "gpt-5.6-sol",
     ): PricingEntry(
-        input_cost_per_million=Decimal("5.00"),
-        output_cost_per_million=Decimal("30.00"),
-        cache_read_cost_per_million=Decimal("0.50"),
-        cache_write_cost_per_million=Decimal("6.25"),
+        input_cost_per_million=Decimal("4.00"),
+        output_cost_per_million=Decimal("20.00"),
+        cache_read_cost_per_million=Decimal("0.40"),
+        cache_write_cost_per_million=Decimal("5.00"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("8.00"),
+        output_cost_per_million_above=Decimal("30.00"),
+        cache_read_cost_per_million_above=Decimal("0.80"),
+        cache_write_cost_per_million_above=Decimal("10.00"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
     ),
     (
         "openai",
         "gpt-5.6-terra",
     ): PricingEntry(
-        input_cost_per_million=Decimal("2.50"),
-        output_cost_per_million=Decimal("15.00"),
-        cache_read_cost_per_million=Decimal("0.25"),
-        cache_write_cost_per_million=Decimal("3.125"),
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("12.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("18.00"),
+        cache_read_cost_per_million_above=Decimal("0.40"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
     ),
     (
         "openai",
         "gpt-5.6-luna",
     ): PricingEntry(
-        input_cost_per_million=Decimal("1.00"),
-        output_cost_per_million=Decimal("6.00"),
-        cache_read_cost_per_million=Decimal("0.10"),
-        cache_write_cost_per_million=Decimal("1.25"),
+        input_cost_per_million=Decimal("0.20"),
+        output_cost_per_million=Decimal("1.20"),
+        cache_read_cost_per_million=Decimal("0.02"),
+        cache_write_cost_per_million=Decimal("0.25"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("0.40"),
+        output_cost_per_million_above=Decimal("1.80"),
+        cache_read_cost_per_million_above=Decimal("0.04"),
+        cache_write_cost_per_million_above=Decimal("0.50"),
         source="official_docs_snapshot",
-        source_url="https://openai.com/index/previewing-gpt-5-6-sol/",
-        pricing_version="openai-gpt-5.6-2026-07",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-10-17",
+    ),
+    # ── OpenAI GPT-6 series (Astra / 6.1 Sol / 6.1 Terra / 6 Sol / 6 Luna) ─
+    # Standard tier from OpenAI's API pricing page, read 2026-11-08 (per 1M
+    # tokens: input / cached input / 30-minute cache write / output). The
+    # same 272K whole-request tier as GPT-5.6 applies. These are the ids
+    # Hermes pins (Codex lanes bill as included; the metered API fallback
+    # bills at these rates) — before this patch every GPT-6 API session
+    # priced as "unknown" (fork patch 2026-11-08).
+    # Source: https://developers.openai.com/api/docs/pricing
+    (
+        "openai",
+        "gpt-6-astra",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("10.00"),
+        output_cost_per_million=Decimal("50.00"),
+        cache_read_cost_per_million=Decimal("1.00"),
+        cache_write_cost_per_million=Decimal("12.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("20.00"),
+        output_cost_per_million_above=Decimal("75.00"),
+        cache_read_cost_per_million_above=Decimal("2.00"),
+        cache_write_cost_per_million_above=Decimal("25.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6.1-sol",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.10"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("15.00"),
+        cache_read_cost_per_million_above=Decimal("0.20"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6.1-terra",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("1.00"),
+        output_cost_per_million=Decimal("5.00"),
+        cache_read_cost_per_million=Decimal("0.05"),
+        cache_write_cost_per_million=Decimal("1.25"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("2.00"),
+        output_cost_per_million_above=Decimal("7.50"),
+        cache_read_cost_per_million_above=Decimal("0.10"),
+        cache_write_cost_per_million_above=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6-sol",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("15.00"),
+        cache_read_cost_per_million_above=Decimal("0.40"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6-luna",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.10"),
+        output_cost_per_million=Decimal("0.50"),
+        cache_read_cost_per_million=Decimal("0.01"),
+        cache_write_cost_per_million=Decimal("0.125"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("0.20"),
+        output_cost_per_million_above=Decimal("0.75"),
+        cache_read_cost_per_million_above=Decimal("0.02"),
+        cache_write_cost_per_million_above=Decimal("0.25"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
     ),
     # ── Anthropic Claude 4.8 ─────────────────────────────────────────────
     # Same $5/$25 base pricing as 4.6/4.7.  Fast-mode variant is a separate
@@ -232,10 +345,64 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://openrouter.ai/anthropic/claude-opus-4.8-fast",
         pricing_version="anthropic-pricing-2026-05",
     ),
+    # ── Anthropic Claude 5.5 (Opus / Sonnet) ─────────────────────────────
+    # Pricing page read 2026-11-08: Opus $4/$20, Sonnet $2/$10 per MTok;
+    # 5-minute cache writes 1.25x input; cache hits 0.05x input (not the
+    # usual 0.1x). The full 1M window bills at standard rates (no tier).
+    # Hermes pins claude-opus-5-5 as the last fallback (fork patch
+    # 2026-11-08; before it, those sessions priced as "unknown").
+    # Source: https://platform.claude.com/docs/en/about-claude/pricing
+    (
+        "anthropic",
+        "claude-opus-5-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("4.00"),
+        output_cost_per_million=Decimal("20.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-11-08",
+    ),
+    (
+        "anthropic",
+        "claude-sonnet-5-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.10"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-11-08",
+    ),
+    # ── xAI Grok 4.7 ─────────────────────────────────────────────────────
+    # docs.x.ai read 2026-11-08: $2 input / $0.50 cached / $6 output per 1M;
+    # a request whose prompt REACHES 200K tokens bills every token at
+    # $4 / $1 / $12. The tier check here is "prompt > threshold", so the
+    # threshold is 199,999 to match "reaches". xAI lists no cache-write
+    # charge (automatic caching), so writes bill at zero.
+    # Source: https://docs.x.ai/docs/models
+    (
+        "xai",
+        "grok-4.7",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("6.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("0"),
+        tier_threshold_tokens=199_999,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("12.00"),
+        cache_read_cost_per_million_above=Decimal("1.00"),
+        source="official_docs_snapshot",
+        source_url="https://docs.x.ai/docs/models",
+        pricing_version="xai-pricing-2026-11-08",
+    ),
     # ── Anthropic Claude Sonnet 5 ────────────────────────────────────────
-    # Launched 2026-06-30. Introductory pricing ($2/$10 per MTok) runs
-    # through 2026-08-31, after which it reverts to $3/$15 (matching
-    # Sonnet 4.6). Update this entry when the intro window closes.
+    # Launched 2026-06-30 at introductory $2/$10 per MTok; Anthropic made
+    # that the standard price (the planned 2026-09-01 move to $3/$15 did not
+    # happen — pricing page footnote, read 2026-11-08).
     # Source: https://platform.claude.com/docs/en/about-claude/pricing
     (
         "anthropic",
@@ -1120,6 +1287,12 @@ def resolve_billing_route(
         # Fireworks model ids look like accounts/fireworks/models/<name>;
         # rsplit("/", 1)[-1] yields just <name> which is what the dict keys on.
         return BillingRoute(provider="fireworks", model=model.rsplit("/", 1)[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+    # A custom endpoint whose host is exactly api.openai.com (e.g. a
+    # `custom:openai` provider entry, recorded at runtime as "custom") IS the
+    # direct OpenAI API and is invoiced at OpenAI's rates. Exact-host match
+    # only: proxies and look-alike hosts keep the unknown route below.
+    if base_url_hostname(base_url or "") == _OPENAI_API_HOST:
+        return BillingRoute(provider="openai", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
     if provider_name in {"custom", "local"} or (base and base_url_hostname(base) in ("localhost", "127.0.0.1")):
         return BillingRoute(provider=provider_name or "custom", model=model, base_url=base_url or "", billing_mode="unknown")
     return BillingRoute(provider=provider_name or "unknown", model=model.split("/")[-1] if model else "", base_url=base_url or "", billing_mode="unknown")
@@ -1287,7 +1460,69 @@ def get_pricing_entry(
         )
         if entry:
             return entry
-    return _lookup_official_docs_pricing(route)
+    entry = _lookup_official_docs_pricing(route)
+    if entry is None and route.provider == "openai":
+        # The snapshot table wins when it covers the model; newer OpenAI
+        # models fall back to the cached models.dev registry (no network).
+        entry = _models_dev_pricing_entry("openai", route.model)
+    return entry
+
+
+def _models_dev_context_tier(tiers: Any) -> Optional[tuple[int, Dict[str, Any]]]:
+    """Return ``(threshold_tokens, rates)`` for the lowest models.dev context tier."""
+    best: Optional[tuple[int, Dict[str, Any]]] = None
+    for tier in tiers if isinstance(tiers, list) else ():
+        spec = tier.get("tier") if isinstance(tier, dict) else None
+        if not isinstance(spec, dict) or spec.get("type") != "context":
+            continue
+        size = _to_int(spec.get("size"))
+        if size > 0 and (best is None or size < best[0]):
+            best = (size, tier)
+    return best
+
+
+def _models_dev_pricing_entry(mdev_provider: str, model: str) -> Optional[PricingEntry]:
+    """Build a pricing entry from the cached models.dev registry, or None.
+
+    Reads only the in-memory/disk cache (``allow_network=False``) so a turn
+    never waits on models.dev. Rates are USD per 1M tokens. A ``tiers[]``
+    context tier maps onto the whole-request tier fields: above
+    ``tier.size`` prompt tokens its rates apply. A model with no positive
+    input/output rate stays unpriced rather than reading as $0. The entry is
+    labelled ``models_dev_snapshot`` so it is never mistaken for an official
+    price row.
+    """
+    try:
+        from agent.models_dev import _find_model_entry, fetch_models_dev
+
+        models = (fetch_models_dev(allow_network=False).get(mdev_provider) or {}).get("models")
+        raw = _find_model_entry(models, model) if isinstance(models, dict) else None
+        cost = raw.get("cost") if isinstance(raw, dict) else None
+        if not isinstance(cost, dict):
+            return None
+        input_rate = _to_decimal(cost.get("input"))
+        output_rate = _to_decimal(cost.get("output"))
+        if not any(rate is not None and rate > _ZERO for rate in (input_rate, output_rate)):
+            return None
+        tier = _models_dev_context_tier(cost.get("tiers"))
+        threshold, above = tier if tier else (None, {})
+        return PricingEntry(
+            input_cost_per_million=input_rate,
+            output_cost_per_million=output_rate,
+            cache_read_cost_per_million=_to_decimal(cost.get("cache_read")),
+            cache_write_cost_per_million=_to_decimal(cost.get("cache_write")),
+            source="models_dev_snapshot",
+            source_url=_MODELS_DEV_SOURCE_URL,
+            pricing_version="models-dev-cache",
+            tier_threshold_tokens=threshold,
+            input_cost_per_million_above=_to_decimal(above.get("input")),
+            output_cost_per_million_above=_to_decimal(above.get("output")),
+            cache_read_cost_per_million_above=_to_decimal(above.get("cache_read")),
+            cache_write_cost_per_million_above=_to_decimal(above.get("cache_write")),
+        )
+    except Exception as exc:  # pricing must never break a turn
+        logger.debug("models.dev pricing lookup failed for %s/%s: %s", mdev_provider, model, exc)
+        return None
 
 
 def normalize_usage(
@@ -1478,6 +1713,7 @@ def estimate_usage_cost(
     input_rate = entry.input_cost_per_million
     output_rate = entry.output_cost_per_million
     cache_read_rate = entry.cache_read_cost_per_million
+    cache_write_rate = entry.cache_write_cost_per_million
     if (
         entry.tier_threshold_tokens is not None
         and usage.prompt_tokens > entry.tier_threshold_tokens
@@ -1488,6 +1724,8 @@ def estimate_usage_cost(
             output_rate = entry.output_cost_per_million_above
         if entry.cache_read_cost_per_million_above is not None:
             cache_read_rate = entry.cache_read_cost_per_million_above
+        if entry.cache_write_cost_per_million_above is not None:
+            cache_write_rate = entry.cache_write_cost_per_million_above
 
     if usage.input_tokens and input_rate is None:
         return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
@@ -1503,7 +1741,7 @@ def estimate_usage_cost(
                 notes=("cache-read pricing unavailable for route",),
             )
     if usage.cache_write_tokens:
-        if entry.cache_write_cost_per_million is None:
+        if cache_write_rate is None:
             return CostResult(
                 amount_usd=None,
                 status="unknown",
@@ -1518,8 +1756,8 @@ def estimate_usage_cost(
         amount += Decimal(usage.output_tokens) * output_rate / _ONE_MILLION
     if cache_read_rate is not None:
         amount += Decimal(usage.cache_read_tokens) * cache_read_rate / _ONE_MILLION
-    if entry.cache_write_cost_per_million is not None:
-        amount += Decimal(usage.cache_write_tokens) * entry.cache_write_cost_per_million / _ONE_MILLION
+    if cache_write_rate is not None:
+        amount += Decimal(usage.cache_write_tokens) * cache_write_rate / _ONE_MILLION
     if entry.request_cost is not None and usage.request_count:
         amount += Decimal(usage.request_count) * entry.request_cost
 
@@ -1532,6 +1770,8 @@ def estimate_usage_cost(
 
     if route.provider == "openrouter":
         notes.append("OpenRouter cost is estimated from the models API until reconciled.")
+    if entry.source == "models_dev_snapshot":
+        notes.append(_MODELS_DEV_NOTE)
 
     return CostResult(
         amount_usd=amount,

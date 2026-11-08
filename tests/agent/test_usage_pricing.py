@@ -872,10 +872,12 @@ def test_flat_entries_unaffected_by_tier_machinery():
 # ── Direct OpenAI API through a custom provider (custom:openai) ───────────
 
 _OPENAI_BASE = "https://api.openai.com/v1"
+# "gpt-6.2-sol" stands for a model the snapshot table lacks, so these tests
+# drive the models.dev fallback (gpt-6.1-sol itself has a table row now).
 _FAKE_MODELS_DEV = {
     "openai": {
         "models": {
-            "gpt-6.1-sol": {
+            "gpt-6.2-sol": {
                 "cost": {
                     "input": 2,
                     "output": 10,
@@ -915,11 +917,11 @@ def test_custom_provider_on_api_openai_com_prices_from_models_dev(monkeypatch):
     it must now bill on the OpenAI route, falling back to models.dev rates
     for models the snapshot table lacks."""
     _offline_openai_pricing(monkeypatch)
-    route = resolve_billing_route("gpt-6.1-sol", provider="custom", base_url=_OPENAI_BASE)
+    route = resolve_billing_route("gpt-6.2-sol", provider="custom", base_url=_OPENAI_BASE)
     assert (route.provider, route.billing_mode) == ("openai", "official_docs_snapshot")
 
     result = estimate_usage_cost(
-        "gpt-6.1-sol",
+        "gpt-6.2-sol",
         CanonicalUsage(
             input_tokens=100_000,
             output_tokens=10_000,
@@ -941,7 +943,7 @@ def test_api_openai_com_long_context_tier_applies_to_whole_request(monkeypatch):
     included, bills at the tier rates; exactly at the size is still base."""
     _offline_openai_pricing(monkeypatch)
     above = estimate_usage_cost(
-        "gpt-6.1-sol",
+        "gpt-6.2-sol",
         CanonicalUsage(
             input_tokens=200_000,
             output_tokens=10_000,
@@ -955,7 +957,7 @@ def test_api_openai_com_long_context_tier_applies_to_whole_request(monkeypatch):
     assert above.amount_usd == Decimal("1.062")
 
     at_threshold = estimate_usage_cost(
-        "gpt-6.1-sol",
+        "gpt-6.2-sol",
         CanonicalUsage(input_tokens=272_000, output_tokens=10_000),
         provider="custom",
         base_url=_OPENAI_BASE,
@@ -1016,10 +1018,10 @@ def test_other_custom_endpoints_stay_unknown(monkeypatch):
         "https://api.openai.com.example/v1",
         "https://proxy.example/api.openai.com/v1",
     ):
-        route = resolve_billing_route("gpt-6.1-sol", provider="custom", base_url=base_url)
+        route = resolve_billing_route("gpt-6.2-sol", provider="custom", base_url=base_url)
         assert route.billing_mode == "unknown", base_url
         result = estimate_usage_cost(
-            "gpt-6.1-sol",
+            "gpt-6.2-sol",
             CanonicalUsage(input_tokens=1_000, output_tokens=1_000),
             provider="custom",
             base_url=base_url,

@@ -168,7 +168,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # to the whole request. The July preview post's rates (Sol $5/$30, Terra
     # $2.50/$15, Luna $1/$6) are superseded — Luna was over-stated 5x (fork
     # patch 2026-10-17, e2e review B#14). The page marks Sol's rate as
-    # promotional "at least through November 21, 2026"; re-check after that.
+    # promotional until November 30, 2026 (read 2026-11-08); re-check then.
     # "Sol Fast mode" is a separate serving tier, not covered here. The page
     # lists no GPT-5.6 "-pro" rows; the "-pro" / "-900k" aliases below the
     # dict keep billing at these base rates.
@@ -224,6 +224,99 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://developers.openai.com/api/docs/pricing",
         pricing_version="openai-pricing-2026-10-17",
     ),
+    # ── OpenAI GPT-6 series (Astra / 6.1 Sol / 6.1 Terra / 6 Sol / 6 Luna) ─
+    # Standard tier from OpenAI's API pricing page, read 2026-11-08 (per 1M
+    # tokens: input / cached input / 30-minute cache write / output). The
+    # same 272K whole-request tier as GPT-5.6 applies. These are the ids
+    # Hermes pins (Codex lanes bill as included; the metered API fallback
+    # bills at these rates) — before this patch every GPT-6 API session
+    # priced as "unknown" (fork patch 2026-11-08).
+    # Source: https://developers.openai.com/api/docs/pricing
+    (
+        "openai",
+        "gpt-6-astra",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("10.00"),
+        output_cost_per_million=Decimal("50.00"),
+        cache_read_cost_per_million=Decimal("1.00"),
+        cache_write_cost_per_million=Decimal("12.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("20.00"),
+        output_cost_per_million_above=Decimal("75.00"),
+        cache_read_cost_per_million_above=Decimal("2.00"),
+        cache_write_cost_per_million_above=Decimal("25.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6.1-sol",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.10"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("15.00"),
+        cache_read_cost_per_million_above=Decimal("0.20"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6.1-terra",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("1.00"),
+        output_cost_per_million=Decimal("5.00"),
+        cache_read_cost_per_million=Decimal("0.05"),
+        cache_write_cost_per_million=Decimal("1.25"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("2.00"),
+        output_cost_per_million_above=Decimal("7.50"),
+        cache_read_cost_per_million_above=Decimal("0.10"),
+        cache_write_cost_per_million_above=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6-sol",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("15.00"),
+        cache_read_cost_per_million_above=Decimal("0.40"),
+        cache_write_cost_per_million_above=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
+    (
+        "openai",
+        "gpt-6-luna",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.10"),
+        output_cost_per_million=Decimal("0.50"),
+        cache_read_cost_per_million=Decimal("0.01"),
+        cache_write_cost_per_million=Decimal("0.125"),
+        tier_threshold_tokens=272_000,
+        input_cost_per_million_above=Decimal("0.20"),
+        output_cost_per_million_above=Decimal("0.75"),
+        cache_read_cost_per_million_above=Decimal("0.02"),
+        cache_write_cost_per_million_above=Decimal("0.25"),
+        source="official_docs_snapshot",
+        source_url="https://developers.openai.com/api/docs/pricing",
+        pricing_version="openai-pricing-2026-11-08",
+    ),
     # ── Anthropic Claude 4.8 ─────────────────────────────────────────────
     # Same $5/$25 base pricing as 4.6/4.7.  Fast-mode variant is a separate
     # model ID with 2x premium (vs the 6x premium on older Opus generations).
@@ -252,10 +345,64 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://openrouter.ai/anthropic/claude-opus-4.8-fast",
         pricing_version="anthropic-pricing-2026-05",
     ),
+    # ── Anthropic Claude 5.5 (Opus / Sonnet) ─────────────────────────────
+    # Pricing page read 2026-11-08: Opus $4/$20, Sonnet $2/$10 per MTok;
+    # 5-minute cache writes 1.25x input; cache hits 0.05x input (not the
+    # usual 0.1x). The full 1M window bills at standard rates (no tier).
+    # Hermes pins claude-opus-5-5 as the last fallback (fork patch
+    # 2026-11-08; before it, those sessions priced as "unknown").
+    # Source: https://platform.claude.com/docs/en/about-claude/pricing
+    (
+        "anthropic",
+        "claude-opus-5-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("4.00"),
+        output_cost_per_million=Decimal("20.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("5.00"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-11-08",
+    ),
+    (
+        "anthropic",
+        "claude-sonnet-5-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.10"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-11-08",
+    ),
+    # ── xAI Grok 4.7 ─────────────────────────────────────────────────────
+    # docs.x.ai read 2026-11-08: $2 input / $0.50 cached / $6 output per 1M;
+    # a request whose prompt REACHES 200K tokens bills every token at
+    # $4 / $1 / $12. The tier check here is "prompt > threshold", so the
+    # threshold is 199,999 to match "reaches". xAI lists no cache-write
+    # charge (automatic caching), so writes bill at zero.
+    # Source: https://docs.x.ai/docs/models
+    (
+        "xai",
+        "grok-4.7",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("6.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("0"),
+        tier_threshold_tokens=199_999,
+        input_cost_per_million_above=Decimal("4.00"),
+        output_cost_per_million_above=Decimal("12.00"),
+        cache_read_cost_per_million_above=Decimal("1.00"),
+        source="official_docs_snapshot",
+        source_url="https://docs.x.ai/docs/models",
+        pricing_version="xai-pricing-2026-11-08",
+    ),
     # ── Anthropic Claude Sonnet 5 ────────────────────────────────────────
-    # Launched 2026-06-30. Introductory pricing ($2/$10 per MTok) runs
-    # through 2026-08-31, after which it reverts to $3/$15 (matching
-    # Sonnet 4.6). Update this entry when the intro window closes.
+    # Launched 2026-06-30 at introductory $2/$10 per MTok; Anthropic made
+    # that the standard price (the planned 2026-09-01 move to $3/$15 did not
+    # happen — pricing page footnote, read 2026-11-08).
     # Source: https://platform.claude.com/docs/en/about-claude/pricing
     (
         "anthropic",

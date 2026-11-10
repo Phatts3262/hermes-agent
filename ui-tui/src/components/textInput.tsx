@@ -1831,6 +1831,8 @@ export const shouldPassThroughToGlobalHandler = (
   (key.ctrl && input === 'c') ||
   (key.ctrl && input === 'x') ||
   (key.ctrl && input === 'o') ||
+  // Reattach uses Ctrl+L to redraw. It must never insert an "l" into the draft.
+  (key.ctrl && input === 'l') ||
   key.tab ||
   (key.shift && key.tab) ||
   key.pageUp ||

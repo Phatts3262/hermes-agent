@@ -44,12 +44,14 @@ export function Accordion({
   return (
     <Box flexDirection="column">
       <Box onClick={toggle}>
-        <Text color={t.color.accent}>{isOpen ? '▾ ' : '▸ '}</Text>
-        <Text bold color={t.color.accent}>
-          {title}
+        <Text>
+          <Text color={t.color.accent}>{isOpen ? '▾ ' : '▸ '}</Text>
+          <Text bold color={t.color.accent}>
+            {title}
+          </Text>
+          {typeof count === 'number' ? <Text color={t.color.muted}> ({count})</Text> : null}
+          {suffix ? <Text color={t.color.muted}> {suffix}</Text> : null}
         </Text>
-        {typeof count === 'number' ? <Text color={t.color.muted}> ({count})</Text> : null}
-        {suffix ? <Text color={t.color.muted}> {suffix}</Text> : null}
       </Box>
 
       {isOpen ? children : null}

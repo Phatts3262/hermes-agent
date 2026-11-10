@@ -11,7 +11,7 @@ import {
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { DASHBOARD_TUI_MODE, STARTUP_RESUME_ID } from '../config/env.js'
+import { DASHBOARD_TUI_MODE, INLINE_MODE, STARTUP_RESUME_ID } from '../config/env.js'
 import { WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { RESIZE_COALESCE_MS } from '../config/timing.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
@@ -204,6 +204,7 @@ export function useMainApp(gw: GatewayClient) {
   const [dashboardFreshSessionId, setDashboardFreshSessionId] = useState<null | string>(null)
   const [turnStartedAt, setTurnStartedAt] = useState<null | number>(null)
   const [lastTurnEndedAt, setLastTurnEndedAt] = useState<null | number>(null)
+  const lastRepaintedTurn = useRef<null | number>(null)
   // Bumped by the gateway `reaction` event (core-detected affection).
   const goodVibesTick = useStore($goodVibesTick)
   const [bellOnComplete, setBellOnComplete] = useState(false)
@@ -577,6 +578,33 @@ export function useMainApp(gw: GatewayClient) {
       setTurnStartedAt(null)
     }
   }, [ui.busy, turnStartedAt])
+
+  // Windows ConPTY can retain stale cells after a tall inline stream. Paint
+  // one settled frame at completion; never inject a key or restart the agent.
+  useEffect(() => {
+    if (
+      !DASHBOARD_TUI_MODE || !INLINE_MODE || process.platform !== 'win32' ||
+      ui.busy || !ui.sid || turnStartedAt !== null || lastTurnEndedAt === null ||
+      lastRepaintedTurn.current === lastTurnEndedAt
+    ) {
+      return
+    }
+
+    const sid = ui.sid
+
+    const timer = setTimeout(() => {
+      const current = getUiState()
+
+      if (current.busy || current.sid !== sid) {
+        return
+      }
+
+      lastRepaintedTurn.current = lastTurnEndedAt
+      forceRedraw(stdout ?? process.stdout)
+    }, 100)
+
+    return () => clearTimeout(timer)
+  }, [lastTurnEndedAt, turnStartedAt, ui.busy, ui.sid, stdout])
 
   useConfigSync({ gw, setBellOnComplete, setVoiceEnabled, setVoiceRecordKey, sid: ui.sid })
   useBatteryPoll(gw)

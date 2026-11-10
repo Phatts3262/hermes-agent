@@ -107,10 +107,15 @@ def uri_to_path(uri: str) -> str:
     """Inverse of :func:`file_uri`."""
     if not uri.startswith("file://"):
         return uri
-    raw = uri[len("file://"):]
+    raw = unquote(uri[len("file://"):])
     if os.name == "nt" and raw.startswith("/") and len(raw) > 2 and raw[2] == ":":
         raw = raw[1:]  # strip leading slash before drive letter
-    return os.path.normpath(unquote(raw))
+    return os.path.normpath(raw)
+
+
+def _document_key(path: str) -> str:
+    """Match server diagnostics to open documents regardless of Windows path casing."""
+    return os.path.normcase(os.path.abspath(path))
 
 
 def _end_position(text: str) -> Dict[str, int]:
@@ -717,13 +722,13 @@ class LSPClient:
         uri = params.get("uri")
         if not isinstance(uri, str):
             return
-        path = uri_to_path(uri)
+        key = _document_key(uri_to_path(uri))
         diagnostics = params.get("diagnostics") or []
         if not isinstance(diagnostics, list):
             diagnostics = []
         version = params.get("version")
 
-        doc = self._docs.setdefault(path, _DocState(version=-1))
+        doc = self._docs.setdefault(key, _DocState(version=-1))
         if self._seed_first_push and not doc.seed_seen:
             # First push: seed the store WITHOUT a freshness tag.  It
             # arrives before the user-triggered didChange could've
@@ -769,7 +774,8 @@ class LSPClient:
             raise LSPProtocolError(f"cannot read {abs_path}: {e}") from e
 
         uri = file_uri(abs_path)
-        doc = self._docs.get(abs_path)
+        key = _document_key(abs_path)
+        doc = self._docs.get(key)
 
         if doc is not None and doc.version >= 0:
             # Re-open: bump version, fire didChangeWatchedFiles + didChange.
@@ -813,7 +819,7 @@ class LSPClient:
         )
         # Fresh doc state — anything stashed under this path by a
         # pre-open push (relatedDocuments spillover etc.) is discarded.
-        self._docs[abs_path] = _DocState(version=0, text=text)
+        self._docs[key] = _DocState(version=0, text=text)
         await self._send_notification(
             "textDocument/didOpen",
             {
@@ -852,7 +858,8 @@ class LSPClient:
         endpoint).
         """
         abs_path = os.path.abspath(path)
-        doc = self._docs.get(abs_path)
+        key = _document_key(abs_path)
+        doc = self._docs.get(key)
         sent_version = doc.version if doc else -1
         try:
             params: Dict[str, Any] = {
@@ -870,7 +877,7 @@ class LSPClient:
             return
         items = result.get("items")
         if isinstance(items, list):
-            doc = self._docs.setdefault(abs_path, _DocState(version=-1))
+            doc = self._docs.setdefault(key, _DocState(version=-1))
             doc.pull = items
             doc.pull_version = sent_version
         related = result.get("relatedDocuments")
@@ -880,7 +887,7 @@ class LSPClient:
                     continue
                 sub_items = sub.get("items")
                 if isinstance(sub_items, list):
-                    rel = self._docs.setdefault(uri_to_path(uri), _DocState(version=-1))
+                    rel = self._docs.setdefault(_document_key(uri_to_path(uri)), _DocState(version=-1))
                     rel.pull = sub_items
                     # Same send-anchored tagging: fresh only if that
                     # doc hasn't changed since the request went out.
@@ -944,7 +951,7 @@ class LSPClient:
                     pass
 
             # If we got a fresh push for our version, we're done.
-            doc = self._docs.get(abs_path)
+            doc = self._docs.get(_document_key(abs_path))
             if doc and doc.fresh_push(version):
                 return True
 
@@ -959,8 +966,9 @@ class LSPClient:
         """Wait until a fresh publishDiagnostics arrives for ``path`` at ``version``+."""
         deadline = asyncio.get_event_loop().time() + timeout
         baseline = self._push_counter
+        key = _document_key(path)
         while True:
-            doc = self._docs.get(path)
+            doc = self._docs.get(key)
             if doc and doc.fresh_push(version):
                 # Debounce — wait a tick in case more diagnostics arrive
                 # immediately after.  TS often emits in pairs.  We
@@ -1005,7 +1013,7 @@ class LSPClient:
         This is what report paths should use: after an edit, "stale
         errors" and "no errors" must not be conflated.
         """
-        doc = self._docs.get(os.path.abspath(path))
+        doc = self._docs.get(_document_key(path))
         if doc is None:
             return []
         if fresh_only:

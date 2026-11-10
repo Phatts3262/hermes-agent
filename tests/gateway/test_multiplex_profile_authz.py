@@ -27,6 +27,7 @@ def _make_multiplex_runner(monkeypatch):
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(multiplex_profiles=True)
+    runner._primary_adapter_profile_name = "default"
 
     default_adapter = SimpleNamespace(
         send=AsyncMock(),
@@ -66,12 +67,31 @@ def test_default_profile_still_trusts_own_allowlist(monkeypatch):
     assert runner._is_user_authorized(source) is True
 
 
-def test_active_profile_stamp_resolves_primary_adapter(monkeypatch):
-    """A single-profile gateway stamps its active profile but stores adapters as primary."""
-    runner, default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
-    runner._active_profile_name = lambda: "dev"
+@pytest.mark.parametrize("primary_profile", ["default", "dev"])
+def test_active_profile_stamp_resolves_primary_adapter(monkeypatch, tmp_path, primary_profile):
+    """Restored sources use the transport registry inside a routed turn."""
+    from hermes_cli import profiles
+    from gateway.run import _profile_runtime_scope
 
-    assert runner._authorization_adapter(Platform.WECOM, profile="dev") is default_adapter
+    runner, default_adapter, secondary_adapter = _make_multiplex_runner(monkeypatch)
+    runner._primary_adapter_profile_name = primary_profile
+    monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: tmp_path)
+    coder_home = tmp_path / "profiles" / "coder"
+    coder_home.mkdir(parents=True)
+    source = SessionSource(
+        platform=Platform.WECOM, chat_id="dm-chat", chat_type="dm", profile="coder",
+    )
+    restored = SessionSource.from_dict(source.to_dict())
+
+    with _profile_runtime_scope(coder_home):
+        assert runner._active_profile_name() == "coder"
+        assert runner._adapter_for_source(restored) is secondary_adapter
+        assert runner._authorization_adapter(Platform.WECOM, primary_profile) is default_adapter
+        assert runner._authorization_adapter(Platform.WECOM) is default_adapter
+        runner._profile_adapters = {"coder": {}}
+        assert runner._adapter_for_source(restored) is None
+        runner._profile_adapters = {}
+        assert runner._adapter_for_source(restored) is None
 
 
 def test_secondary_allowlist_dm_behavior_ignores_unauthorized(monkeypatch):

@@ -583,8 +583,13 @@ export function useMainApp(gw: GatewayClient) {
   // one settled frame at completion; never inject a key or restart the agent.
   useEffect(() => {
     if (
-      !DASHBOARD_TUI_MODE || !INLINE_MODE || process.platform !== 'win32' ||
-      ui.busy || !ui.sid || turnStartedAt !== null || lastTurnEndedAt === null ||
+      !DASHBOARD_TUI_MODE ||
+      !INLINE_MODE ||
+      process.platform !== 'win32' ||
+      ui.busy ||
+      !ui.sid ||
+      turnStartedAt !== null ||
+      lastTurnEndedAt === null ||
       lastRepaintedTurn.current === lastTurnEndedAt
     ) {
       return
